@@ -35,18 +35,16 @@ DSH 桌面版一键重启插件：在侧边栏底部与设置页各加一个「�
 
 ## 安装
 
-### 官方桌面版
+在 DSH 桌面版所在机器上运行：
 
-普通用户的目标安装方式是通过 DSH 桌面端插件市场搜索 `dsh-restart-now` 并点击安装，不需要下载或解压项目源码。安装后按界面提示重启 DSH。
+```powershell
+dsh plugin --profile desktop add dsh-restart-now
+```
 
-**当前分发状态（2026-10-09）：** [市场收录 PR #6947](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/6947) 尚未完成审核，npm 包 `dsh-restart-now@1.0.0` 也尚未发布，因此当前市场里还搜不到本插件，公开的一键安装暂不可用。上架后还需确认桌面市场支持该条目声明的安装来源，再开放此安装入口。
-
-桌面端「设置 → 插件 → 从本地目录安装」仅用于开发和验收，不是普通用户的发行安装步骤。
+DSH CLI 会通过 pnpm 从 npm 安装插件，并将其登记到桌面 profile；不需要下载或解压项目源码。安装完成后重启 DSH。升级时再次运行该命令。
 
 ## 开发
 
 ```powershell
-npm test   # node:test，U1–U8，无副作用
+npm test   # node:test
 ```
-
-设计文档见 `docs/01-需求文档.md`、`docs/02-实施文档.md`、`docs/03-测试文档.md`。
