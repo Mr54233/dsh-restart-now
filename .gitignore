@@ -1,3 +1,5 @@
 node_modules/
 .m4/
 *.log
+
+/docs/**/*.md
