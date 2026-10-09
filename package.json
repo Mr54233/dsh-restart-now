@@ -1,0 +1,52 @@
+{
+  "name": "dsh-restart-now",
+  "version": "1.0.0",
+  "description": "DSH 桌面版一键重启：UI 内点击退出并重新拉起 DeepSeek Harness",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/helper.test.js test/guard.test.js test/environment.test.js test/config-store.test.js test/schema.test.js test/prune.test.js test/probe.test.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "restart"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "url": "git+https://github.com/Mr54233/dsh-restart-now.git",
+    "type": "git"
+  },
+  "author": "Mr54233",
+  "engines": {
+    "dsh": ">=0.1.0"
+  }
+}

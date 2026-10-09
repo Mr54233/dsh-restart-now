@@ -1,0 +1,3 @@
+- insert:
+    - id: restart-now
+      name: dsh-restart-now
