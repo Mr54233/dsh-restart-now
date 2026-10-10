@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "重启应用",
-    "description": "DSH 桌面版一键重启：从侧栏或设置页确认后，应用自动关闭并重新拉起。仅支持 Windows。"
+    "description": "DSH 桌面版一键重启：从侧栏或设置页确认后，应用自动关闭并重新拉起。暂时仅支持 Windows。"
   }
 }

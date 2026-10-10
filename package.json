@@ -1,6 +1,6 @@
 {
   "name": "dsh-restart-now",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Restart DSH Desktop from the sidebar or Settings. After confirmation, closes and relaunches the app; only active in the desktop host. · DSH 桌面版一键重启：从侧栏或设置页发起，确认后关闭并重新拉起应用；仅在桌面宿主生效。",
   "icon": "icon.svg",
   "license": "MIT",
