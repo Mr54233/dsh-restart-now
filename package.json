@@ -1,6 +1,6 @@
 {
   "name": "dsh-restart-now",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "DSH 桌面版一键重启：UI 内点击退出并重新拉起 DeepSeek Harness",
   "license": "MIT",
   "type": "module",
