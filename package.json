@@ -1,18 +1,23 @@
 {
   "name": "dsh-restart-now",
-  "version": "1.0.1",
-  "description": "DSH 桌面版一键重启：UI 内点击退出并重新拉起 DeepSeek Harness",
+  "version": "1.0.2",
+  "description": "Restart DSH Desktop from the sidebar or Settings. After confirmation, closes and relaunches the app; only active in the desktop host. · DSH 桌面版一键重启：从侧栏或设置页发起，确认后关闭并重新拉起应用；仅在桌面宿主生效。",
+  "icon": "icon.svg",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./client": "./lib/client.js"
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "lib",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "icon.svg",
+    "locale/*.json"
   ],
   "scripts": {
     "test": "node --test test/helper.test.js test/guard.test.js test/environment.test.js test/config-store.test.js test/schema.test.js test/prune.test.js test/probe.test.js"
@@ -48,5 +53,8 @@
   "author": "Mr54233",
   "engines": {
     "dsh": ">=0.1.0"
-  }
+  },
+  "os": [
+    "win32"
+  ]
 }

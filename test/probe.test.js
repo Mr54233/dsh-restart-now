@@ -46,6 +46,7 @@ test('U15a: 探测口回传 environment + 生效配置（patch 值可见）+ der
   const body = JSON.parse(res.body);
   assert.equal(body.ok, true);
   assert.equal(body.environment, 'web');
+  assert.equal(body.platform, process.platform, 'v1.0.2 起探测口回传平台（客户端据此在非 win32 零挂载）');
   assert.equal(body.config.confirm, false, 'patch 层配置进入生效配置');
   assert.equal(typeof body.config.allowRestart, 'boolean');
   assert.equal(typeof body.config.delayMs, 'number');

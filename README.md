@@ -43,6 +43,16 @@ dsh plugin --profile desktop add dsh-restart-now
 
 DSH CLI 会通过 pnpm 从 npm 安装插件，并将其登记到桌面 profile；不需要下载或解压项目源码。安装完成后重启 DSH。升级时再次运行该命令。
 
+## 适用范围
+
+- **操作系统**：仅 Windows 10/11。重启链路（WMI `Win32_Process.Create`、
+  wscript VBS 派发、`taskkill /T`、`DeepSeek Harness.exe` 路径推导）全部是
+  Windows 机制；在其他系统上安装后插件不挂载任何入口，动作口返回
+  403 `unsupported-platform`。
+- **DSH 版本**：DSH Desktop ≥ 44（在 44.0.0 上验证；`engines.dsh >= 0.1.0`，
+  CLI 装包走 `dsh plugin`）。Web profile / `dsh web` 下插件不生效（不挂载入口，
+  动作口拒绝并提示使用 dshmarket 的宿主重启）。
+
 ## 开发
 
 ```powershell
