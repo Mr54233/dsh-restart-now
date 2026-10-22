@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import * as plugin from '../lib/index.js';
+import { SUPPORTED_RANGE } from '../lib/version.js';
 
 const BASE = '/plugins/dsh-restart-now';
 
@@ -246,7 +247,7 @@ test('U20h 探测口：非 desktop 也回 200 与完整快照（客户端靠它�
   assert.deepEqual(Object.keys(body.config).sort(),
     ['allowRestart', 'confirm', 'exePath', 'hideSidebarButton'], '配置只剩 4 键（delayMs 已删）');
   assert.ok('lastRestart' in body);
-  assert.equal(body.supportedRange, '>=0.2.0', '选择题 9：探测口须回传支持范围');
+  assert.equal(body.supportedRange, SUPPORTED_RANGE, '选择题 9：探测口须回传支持范围');
   assert.ok('version' in body && 'supported' in body, '探测口须回传运行时版本与是否支持');
   assert.equal(body.wait.state, 'idle');
 });
@@ -317,4 +318,25 @@ test('U20k 命令 handler 参数解析：--force / --wait 被识别', async () =
   const cancel = await call(route('POST', `${BASE}/restart`),
     makeReq({ method: 'POST', url: `${BASE}/restart?cancel=1` }));
   assert.equal(cancel.statusCode, 200);
+});
+
+test('U20l 插件卸载时等待定时器一并停掉（否则下线后还会按计划重启）', async () => {
+  const agents = { list: () => [{ id: 'a1', status: 'running', inbox: { nextTurn: [], nextStep: [] } }] };
+  const jobs = { list: () => [] };
+  const { ctx, route, disposers } = makeCtx({ profileContext: DESKTOP, agents, jobs });
+  plugin.apply(ctx, {});
+
+  const statusHandler = route('GET', `${BASE}/status`);
+  const started = await call(route('POST', `${BASE}/restart`),
+    makeReq({ method: 'POST', url: `${BASE}/restart?wait=1` }));
+  assert.equal(started.statusCode, 202);
+
+  const before = await call(statusHandler, makeReq({ method: 'GET', url: `${BASE}/status` }));
+  assert.equal(before.json().state, 'waiting');
+
+  // 模拟插件卸载：把 effect 的 teardown 全跑一遍（内含 cancelWait）
+  for (const dispose of disposers) { try { dispose(); } catch { /* 已释放 */ } }
+
+  const after = await call(statusHandler, makeReq({ method: 'GET', url: `${BASE}/status` }));
+  assert.equal(after.json().state, 'idle', '卸载后等待状态必须复位');
 });

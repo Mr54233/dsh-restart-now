@@ -4,6 +4,7 @@
 // 在每次重启后「复活」。修复后探测口一次回传 environment+config+derivedExe。
 // 本测试用 fake ctx/host 直接调 apply()，不需要真实 DSH 宿主。
 import test from 'node:test';
+import { SUPPORTED_RANGE } from '../lib/version.js';
 import assert from 'node:assert/strict';
 
 function makeHost() {
@@ -55,7 +56,7 @@ test('U15a: 探测口回传 environment + 生效配置（patch 值可见）+ der
   assert.equal(typeof body.derivedExe, 'string');
   assert.ok(body.derivedExe.length > 0, 'derivedExe 非空（resolveExe 总有输出）');
   // v1.1 新增：版本判定 + 上次重启回执 + 等待模式快照
-  assert.equal(body.supportedRange, '>=0.2.0');
+  assert.equal(body.supportedRange, SUPPORTED_RANGE);
   assert.ok('version' in body && 'supported' in body);
   assert.ok('lastRestart' in body && typeof body.lastRestart === 'object');
   assert.equal(body.wait.state, 'idle');
