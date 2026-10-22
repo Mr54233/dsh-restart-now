@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Restart Now",
-    "description": "One-click restart for DSH Desktop: confirm from the sidebar or Settings, and the app closes and relaunches itself. Windows only for now."
+    "description": "One-click restart for DSH Desktop from five entries (sidebar panel, sidebar footer, conversation header, Settings row, /restart), each switchable. Windows only for now."
   }
 }

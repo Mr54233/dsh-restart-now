@@ -35,11 +35,14 @@ function makeElement(tag) {
 }
 
 /** 把 client.js 装进最小浏览器沙箱，返回捕获到的模块导出与记录对象 */
-function load({ probeBody, lang = 'zh-CN', locale = null }) {
+function load({ probeBody, lang = 'zh-CN', locale = null, entries = null }) {
   const captured = { id: null, exports: null };
   const injected = [];
   const appendedStyles = [];
   const localeInjections = [];
+  const effects = [];
+  const store = new Map();
+  if (entries) store.set('dsh-restart-now:entries', JSON.stringify(entries));
   const createElement = (type, props, ...children) => ({ type, props: props || {}, children });
 
   const document = {
@@ -73,6 +76,12 @@ function load({ probeBody, lang = 'zh-CN', locale = null }) {
       });
     },
     window: {
+      // v1.2：入口开关存本机 localStorage
+      localStorage: {
+        getItem: (key) => (store.has(key) ? store.get(key) : null),
+        setItem: (key, value) => { store.set(key, String(value)); },
+        removeItem: (key) => { store.delete(key); },
+      },
       __ModuleLoader__: {
         load(descriptor) {
           captured.id = descriptor.id;
@@ -108,8 +117,10 @@ function load({ probeBody, lang = 'zh-CN', locale = null }) {
       if (locale && deps.includes('locale')) callback({ locale, get: (n) => (n === 'locale' ? locale : undefined) });
       return () => {};
     },
+    // v1.2：入口注销用 ctx.effect（真 cordis 里插件卸载时会跑 teardown）
+    effect: (fn) => { const dispose = fn(); effects.push(dispose); return dispose; },
   };
-  return { captured, injected, appendedStyles, fetchCalls, ctx, createElement, localeInjections };
+  return { captured, injected, appendedStyles, fetchCalls, ctx, createElement, localeInjections, effects, store };
 }
 
 const DESKTOP_PROBE = {
@@ -176,37 +187,97 @@ test('U21b web 环境（含平台不符）→ 零挂载，不碰任何槽位', a
   }
 });
 
-test('U21c desktop 环境 → 挂载 sidebar.footer.action 与 settings.section 两个槽位', async () => {
-  const { captured, injected, ctx, createElement } = load({
-    probeBody: {
-      ok: true,
-      environment: 'desktop',
-      platform: 'win32',
-      config: { allowRestart: true, confirm: true, exePath: '', hideSidebarButton: false },
-      derivedExe: 'D:\\dsh\\DeepSeek Harness.exe',
-      version: '0.2.1-rc.2',
-      supportedRange: '>=0.2.0-0',
-      supported: true,
-      lastRestart: { status: 'none' },
-      wait: { state: 'idle' },
-    },
+test('U21c desktop 环境 → 挂载配置页 + 四个入口（panellist/main 成对）', async () => {
+  const { captured, injected, ctx, createElement } = load({ probeBody: DESKTOP_PROBE });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  assert.deepEqual(injected.map((i) => i.slotName).sort(), [
+    'conversation.session.header.actions',
+    'main',
+    'settings.general.item',
+    'settings.section',
+    'sidebar.footer.action',
+    'sidebar.panellist',
+  ]);
+
+  // 槽位注册描述符必须带 name；除 main（keyed 槽位，只有 key）外还要 id/label
+  const descriptors = injected.map((i) => ({ slotName: i.slotName, descriptor: i.factory() }));
+  for (const { slotName, descriptor } of descriptors) {
+    assert.ok(descriptor, `${slotName} 注册回调须返回描述符`);
+    assert.ok(descriptor.name, `${slotName} 描述符缺 name`);
+  }
+  for (const { slotName, descriptor } of descriptors) {
+    if (slotName === 'main') {
+      assert.equal(descriptor.key, 'dsh-restart-now', 'main 槽位必须用 panel 的 key');
+      continue;
+    }
+    assert.ok(descriptor.id, `${slotName} 描述符缺 id`);
+    // label 只有「导航行/整行」类槽位需要（官方 settings.general.item 与 header.actions 的
+    // 示例都只传 id/order/locale：名字由组件自己画）
+    if (slotName === 'settings.section' || slotName === 'sidebar.panellist' || slotName === 'sidebar.footer.action') {
+      assert.ok(descriptor.label, `${slotName} 描述符缺 label（v0.6 踩过空名字）`);
+    }
+  }
+  assert.equal(typeof createElement, 'function');
+});
+
+test('U21c2 关掉的入口连注册一起撤掉（不是渲染成空，而是压根不注册）', async () => {
+  // 用户上次在设置页关掉了 底部按钮 与 顶栏按钮 → localStorage 记着
+  const { captured, injected, ctx } = load({
+    probeBody: DESKTOP_PROBE,
+    entries: { panel: true, footer: false, header: false, settingsRow: true },
   });
   captured.exports.apply(ctx, {});
   await flush();
 
-  assert.deepEqual(injected.map((i) => i.slotName).sort(), ['settings.section', 'sidebar.footer.action']);
+  const slots = injected.map((i) => i.slotName).sort();
+  assert.deepEqual(slots, ['main', 'settings.general.item', 'settings.section', 'sidebar.panellist']);
+  assert.ok(!slots.includes('sidebar.footer.action'), 'footer 已关，不该注册');
+  assert.ok(!slots.includes('conversation.session.header.actions'), 'header 已关，不该注册');
+  // 配置页必须始终在，否则关完入口就再也回不来了
+  assert.ok(slots.includes('settings.section'));
+});
 
-  // 槽位注册描述符必须带 name/id/label（label 缺失 → 设置导航空名字，v0.6 踩过）
-  const descriptors = injected.map((i) => i.factory());
-  for (const descriptor of descriptors) {
-    assert.ok(descriptor, '注册回调须返回描述符');
-    assert.ok(descriptor.name);
-    assert.ok(descriptor.id);
-    assert.ok(descriptor.label, 'label 不可缺失');
-  }
-  assert.ok(descriptors.every((d) => d !== undefined));
-  // 渲染函数返回 React 元素（不抛异常、有 type）
-  assert.equal(typeof createElement, 'function');
+test('U21c3 全部入口关掉后仍保留配置页 + 插件卸载时撤销自己注册的入口', async () => {
+  const { captured, injected, ctx, effects } = load({
+    probeBody: DESKTOP_PROBE,
+    entries: { panel: false, footer: false, header: false, settingsRow: false },
+  });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  assert.deepEqual(injected.map((i) => i.slotName), ['settings.section']);
+  // ctx.effect 的 teardown 会被注册（真 cordis 卸载插件时会跑）
+  assert.equal(typeof effects[0], 'function', '应通过 ctx.effect 注册清理回调');
+});
+
+test('U21c4 panellist 与 main 必须成对：只开 panel 时两个都在，关 panel 时两个都不在', async () => {
+  const on = load({ probeBody: DESKTOP_PROBE, entries: { panel: true } });
+  on.captured.exports.apply(on.ctx, {});
+  await flush();
+  const onSlots = on.injected.map((i) => i.slotName);
+  assert.ok(onSlots.includes('sidebar.panellist') && onSlots.includes('main'));
+
+  const off = load({ probeBody: DESKTOP_PROBE, entries: { panel: false } });
+  off.captured.exports.apply(off.ctx, {});
+  await flush();
+  const offSlots = off.injected.map((i) => i.slotName);
+  assert.ok(!offSlots.includes('sidebar.panellist'), 'panel 关掉后不该留 panellist');
+  assert.ok(!offSlots.includes('main'), 'panel 关掉后必须同时撤 main，否则 selectPanel 指向空面板');
+});
+
+test('U21c5 旧配置键 hideSidebarButton 仍能硬关底部按钮（默认值来源）', async () => {
+  const { captured, injected, ctx } = load({
+    probeBody: {
+      ...DESKTOP_PROBE,
+      config: { allowRestart: true, confirm: true, exePath: '', hideSidebarButton: true },
+    },
+  });
+  captured.exports.apply(ctx, {});
+  await flush();
+  assert.ok(!injected.map((i) => i.slotName).includes('sidebar.footer.action'),
+    'hideSidebarButton:true 时底部按钮不应注册（向后兼容 v1.1 的配置）');
 });
 
 test('U21d 中英字典键集合一致（漏翻会退化成中文/键名，用户能看出来）', () => {
@@ -336,4 +407,88 @@ test('U21i locale 服务切到英文 → 已挂载入口跟着换语言', async 
 
   const after = textOf(renderDeep(descriptor.render({ wide: true }))).join(' ');
   assert.ok(after.includes('Restart app'), `切换后应显示英文，实际：${after.slice(0, 120)}`);
+});
+
+// —— v1.2 三个新入口的渲染 ——
+// 竞品1 有五个入口，我们此前只有两个（侧栏底部 + 配置页）。新增：侧栏面板、会话标题栏、
+// 设置→通用 行。这里逐个渲染，确保它们真的产出可交互元素且文案接了字典。
+test('U21j 会话标题栏按钮：渲染出图标 + 本地化文字，宽窄无关', async () => {
+  for (const [lang, expected] of [['zh-CN', '重启'], ['en-US', 'Restart']]) {
+    const { captured, injected, ctx } = load({ probeBody: DESKTOP_PROBE, lang });
+    captured.exports.apply(ctx, {});
+    await flush();
+
+    const header = injected.find((i) => i.slotName === 'conversation.session.header.actions');
+    assert.ok(header, '标题栏槽位未注册');
+    const tree = renderDeep(header.factory().render({}));
+    assert.ok(tree && typeof tree === 'object', '标题栏组件未返回元素');
+    assert.equal(tree.props.className, 'dsrn-hdr');
+    const text = textOf(tree).join(' ');
+    assert.ok(text.includes(expected), `${lang} 标题栏文案应为「${expected}」，实际：${text.slice(0, 80)}`);
+  }
+});
+
+test('U21k 设置→通用 行：左文右钮，点击即重启（不经确认框时直接 POST）', async () => {
+  const { captured, injected, ctx, fetchCalls } = load({
+    probeBody: { ...DESKTOP_PROBE, config: { allowRestart: true, confirm: false, exePath: '', hideSidebarButton: false } },
+    lang: 'zh-CN',
+  });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  const row = injected.find((i) => i.slotName === 'settings.general.item');
+  assert.ok(row, '设置通用行槽位未注册');
+  const tree = renderDeep(row.factory().render({}));
+  assert.ok(tree && typeof tree === 'object');
+  assert.equal(tree.props.className, 'dsrn-gen');
+
+  const text = textOf(tree).join(' ');
+  assert.ok(text.includes('重启'), `应有本地化文案，实际：${text.slice(0, 80)}`);
+
+  // 找到按钮并点它（confirm:false → 直接 POST，不弹确认框）
+  const button = (function walk(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) { for (const child of node) { const hit = walk(child); if (hit) return hit; } return null; }
+    if (node.type === 'button') return node;
+    if (Array.isArray(node.children)) return walk(node.children);
+    return null;
+  })(tree);
+  assert.ok(button, '行内应有按钮');
+  fetchCalls.length = 0;
+  await button.props.onClick();
+  await flush();
+  assert.ok(fetchCalls.some((c) => String(c.url).endsWith('/plugins/dsh-restart-now/restart')
+    && c.init && c.init.method === 'POST'), '点击后应发出重启请求');
+});
+
+test('U21l 侧栏面板页：标题/说明/版本行/上次重启都在，且主按钮可点', async () => {
+  const { captured, injected, ctx } = load({ probeBody: DESKTOP_PROBE, lang: 'zh-CN' });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  // 面板页注册在 keyed 的 main 槽位（restart 是它的 render）
+  const main = injected.find((i) => i.slotName === 'main');
+  assert.ok(main, 'main 槽位未注册');
+  const descriptor = main.factory();
+  const tree = renderDeep(descriptor.render({}));
+  assert.ok(tree && typeof tree === 'object', '面板组件未返回元素');
+  assert.equal(tree.props.className, 'dsrn-panel');
+
+  const text = textOf(tree).join(' ');
+  assert.ok(text.includes('DSH 0.2.1-rc.2'), `版本行缺失：${text.slice(0, 160)}`);
+  assert.ok(!/undefined|NaN/.test(text), `渲染出未定义值：${text.slice(0, 200)}`);
+
+  // panellist 的图标组件只吃 {size, active}，返回图标元素（整行由侧栏自己画）
+  const panellist = injected.find((i) => i.slotName === 'sidebar.panellist');
+  const glyph = panellist.factory().render({ size: 16, active: true });
+  assert.ok(glyph && typeof glyph === 'object', 'panellist 图标未返回元素');
+});
+
+test('U21m v1.2 入口文案两语言齐备（含面板/标题栏/设置行/入口组）', () => {
+  for (const key of ['entryGroup', 'entryPanel', 'entryFooter', 'entryHeader',
+    'entrySettingsRow', 'entryCommandHint', 'panelTitle', 'panelDesc',
+    'headerLabel', 'settingsRowLabel', 'settingsRowHint']) {
+    const hits = source.split(key + ':').length - 1;
+    assert.ok(hits >= 2, `文案键 ${key} 应同时出现在 zh 与 en 里`);
+  }
 });
