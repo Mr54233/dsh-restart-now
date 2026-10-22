@@ -193,3 +193,27 @@ test('U11b 助手脚本真的会去问 WMI、并把结果当参数拉起（而�
     '解析逻辑须内联进脚本（助手不能 import 模块）');
   assert.doesNotThrow(() => new Function(script.replace(/^'use strict';/, '')), '注入后仍是合法 JS');
 });
+
+test('U12 拉起全失败时弹窗告知（v1.2.1 第 5 项）：应用已死，弹窗是唯一能说话的通道', () => {
+  const script = makeScript();
+  assert.ok(script.includes('async function alertUser('), '须有弹窗函数');
+  assert.ok(script.includes('System.Windows.MessageBox'), '用系统消息框，不引入自绘窗口');
+  assert.ok(script.includes("'utf16le'"), '中文必须走 UTF-16LE base64（命令行直接传会乱码）');
+  assert.ok(script.includes("'-EncodedCommand'"), '用 -EncodedCommand 传脚本，避免引号/空格解析问题');
+  assert.ok(script.includes("['powershell.exe', 'pwsh.exe']"), 'powerShell 不在时换 pwsh（7.x 用户）');
+  assert.ok(script.includes('await alertUser('), '弹窗须 await（否则进程先退，弹不出来）');
+  assert.ok(script.includes("'alert_shown='"), '弹没弹成功都要留痕（排查「为什么没提示」）');
+  // 顺序：先写回执再弹窗 —— 回执是「下次启动能看到」的唯一凭据，不能被弹窗失败连累
+  const receiptIndex = script.indexOf("reason: 'respawn-failed'");
+  const alertIndex = script.indexOf('await alertUser(');
+  assert.ok(receiptIndex > 0 && alertIndex > receiptIndex, '回执必须先写，弹窗只是尽力而为');
+  assert.doesNotThrow(() => new Function(script.replace(/^'use strict';/, '')), '注入后仍是合法 JS');
+});
+
+test('U12b 弹窗文案的引号必须按 PowerShell 规则转义（反斜杠不是转义符）', () => {
+  const script = makeScript();
+  // 反例：用 JSON.stringify 拼 PowerShell 字面量，Windows 路径会显示成 C:\Temp（双反斜杠）
+  assert.ok(!script.includes('JSON.stringify(message)'), '不得用 JSON 转义拼 PowerShell 字符串');
+  assert.ok(script.includes(".replace(/'/g, \"''\")"), '单引号字面量里须把 \' 写成 \'\'');
+  assert.ok(script.includes('Add-Type -AssemblyName PresentationFramework'), '消息框来自 WPF 程序集');
+});
