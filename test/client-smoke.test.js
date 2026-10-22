@@ -35,10 +35,11 @@ function makeElement(tag) {
 }
 
 /** 把 client.js 装进最小浏览器沙箱，返回捕获到的模块导出与记录对象 */
-function load({ probeBody, lang = 'zh-CN' }) {
+function load({ probeBody, lang = 'zh-CN', locale = null }) {
   const captured = { id: null, exports: null };
   const injected = [];
   const appendedStyles = [];
+  const localeInjections = [];
   const createElement = (type, props, ...children) => ({ type, props: props || {}, children });
 
   const document = {
@@ -91,12 +92,24 @@ function load({ probeBody, lang = 'zh-CN' }) {
   vm.runInNewContext(source, sandbox, { filename: 'lib/client.js' });
 
   const ctx = {
-    get: (name) => (name === 'slots' ? {
-      inject: (slotName, factory) => { injected.push({ slotName, factory }); },
-      register: (descriptor, render) => ({ ...descriptor, render }),
-    } : undefined),
+    get: (name) => {
+      if (name === 'slots') {
+        return {
+          inject: (slotName, factory) => { injected.push({ slotName, factory }); },
+          register: (descriptor, render) => ({ ...descriptor, render }),
+        };
+      }
+      if (name === 'locale') return locale;
+      return undefined;
+    },
+    // v1.1.1：等 locale 服务出现的那条路（真 shell 里 locale 由官方 locale-client 异步 provide）
+    inject: (deps, callback) => {
+      localeInjections.push(deps);
+      if (locale && deps.includes('locale')) callback({ locale, get: (n) => (n === 'locale' ? locale : undefined) });
+      return () => {};
+    },
   };
-  return { captured, injected, appendedStyles, fetchCalls, ctx, createElement };
+  return { captured, injected, appendedStyles, fetchCalls, ctx, createElement, localeInjections };
 }
 
 const DESKTOP_PROBE = {
@@ -280,4 +293,47 @@ test('U21g 侧栏行渲染成功且宽态显示本地化标题，窄态只有图
     })(narrowTree);
     assert.equal(hasTitle, false, '窄态不应渲染 dsrn-title 文字节点');
   }
+});
+
+// v1.1.1：语言判定必须以 DSH 的 locale 服务为准
+// 真机 bug 现场：桌面端界面是中文，但 <html lang> 由 locale 服务稍后才写、Electron 的
+// navigator.language 是 en-US → 旧实现（只读这两处）把中文界面判成英文。
+test('U21h locale 服务优先：html lang/navigator 都说 en 时也按服务的中文渲染', async () => {
+  const locale = { active: 'zh-CN', getSnapshot: () => ({ active: locale.active }), subscribe() {} };
+  const { captured, injected, ctx } = load({ probeBody: DESKTOP_PROBE, lang: 'en-US', locale });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  const footer = injected.find((i) => i.slotName === 'sidebar.footer.action');
+  assert.ok(footer, '侧栏槽位未注册');
+  const wideText = textOf(renderDeep(footer.factory().render({ wide: true }))).join(' ');
+  assert.ok(wideText.includes('重启应用'), `应显示中文标题，实际：${wideText.slice(0, 120)}`);
+
+  const section = injected.find((i) => i.slotName === 'settings.section');
+  const sectionText = textOf(renderDeep(section.factory().render({}))).join(' ');
+  assert.ok(/配置加载中/.test(sectionText), `设置页应为中文，实际：${sectionText.slice(0, 120)}`);
+});
+
+test('U21i locale 服务切到英文 → 已挂载入口跟着换语言', async () => {
+  let subscriber = null;
+  const locale = {
+    active: 'zh-CN',
+    getSnapshot: () => ({ active: locale.active }),
+    subscribe: (fn) => { subscriber = fn; return () => { subscriber = null; }; },
+  };
+  const { captured, injected, ctx } = load({ probeBody: DESKTOP_PROBE, lang: 'zh-CN', locale });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  const footer = injected.find((i) => i.slotName === 'sidebar.footer.action');
+  const descriptor = footer.factory();
+  assert.ok(textOf(renderDeep(descriptor.render({ wide: true }))).join(' ').includes('重启应用'));
+
+  // 用户在 设置 → 通用 里把语言切成 English
+  locale.active = 'en';
+  assert.equal(typeof subscriber, 'function', '应当订阅 locale 变化');
+  subscriber();
+
+  const after = textOf(renderDeep(descriptor.render({ wide: true }))).join(' ');
+  assert.ok(after.includes('Restart app'), `切换后应显示英文，实际：${after.slice(0, 120)}`);
 });
