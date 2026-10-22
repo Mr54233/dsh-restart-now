@@ -14,7 +14,8 @@ DSH 桌面版一键重启插件：**三个入口**——侧边栏底部图标、
   插件管理器正在装插件时硬拦（409 `installing`）。
 - **重启回执**：成功写「已完成，停机约 N 秒」，失败写原因；设置页与探测口都能读到。
 - **版本自检**：设置页显示「DSH `<version>` · `<range>`」，不满足 `>=0.2.0` 时红字提示。
-- **中英双语**：界面文案跟随宿主语言（37 个键，中英字典键集合由测试保证一致）。
+- **中英双语**：界面文案跟随宿主语言（37 个键，中英字典键集合由测试保证一致）；语言取自 DSH 的 locale 服务，
+  在设置里切换语言即时生效。
 
 ## 工作原理
 
@@ -78,8 +79,10 @@ DSH 桌面版一键重启插件：**三个入口**——侧边栏底部图标、
 ### 客户端半边（`lib/client.js`）
 
 启动时探测环境，**仅 desktop 且平台为 win32** 才挂载 `sidebar.footer.action` 与 `settings.section` 两个槽位；web 环境零挂载。
-文案中英双语（`STRINGS.zh` / `STRINGS.en`，37 键，键集合一致由单测强制）：语言按 `<html lang>` 判定，回退 `navigator.language`，
-非 zh 一律英文。槽位 `label` 是函数 `navLabel()`，语言切换后跟随；导航图标认领同时匹配中英两种标签。
+文案中英双语（`STRINGS.zh` / `STRINGS.en`，37 键，键集合一致由单测强制）。**语言以 DSH 的 locale 服务为准**
+（`locale.getSnapshot().active` → `<html lang>` → `navigator.languages` → `en`；服务异步就绪，故另有
+`<html lang>` 属性观察兜底）：在 设置 → 通用 里切换语言，两个入口即时跟随。槽位 `label` 是函数 `navLabel()`；
+导航图标认领同时匹配中英两种标签。
 
 ### 斜杠命令
 
@@ -131,7 +134,7 @@ DSH CLI 会通过 pnpm 从 npm 安装插件，并将其登记到桌面 profile�
 ## 开发
 
 ```powershell
-npm test            # node:test；12 个文件 91 个用例，零进程副作用、无需运行中的宿主
+npm test            # node:test；12 个文件 93 个用例，零进程副作用、无需运行中的宿主
 npm pack --dry-run  # 校验 tarball 内容（CI 同样会跑）
 ```
 
