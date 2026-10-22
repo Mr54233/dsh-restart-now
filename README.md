@@ -1,12 +1,16 @@
 # dsh-restart-now
 
-DSH 桌面版一键重启插件：**三个入口**——侧边栏底部图标、设置页「重启应用」区块、斜杠命令 `/restart`。
+DSH 桌面版一键重启插件（v1.2.0）：**五个入口**——侧边栏面板、侧边栏底部图标、会话标题栏按钮、设置 → 通用 里的一行、斜杠命令 `/restart`。
+其中四个界面入口都能在设置 → 重启应用 里**单独开关**（关掉即从界面上撤除，不是仅仅隐藏）；斜杠命令没有界面可关，始终可用。
 点一下（或敲一条命令）后，插件先确认自己真的能把助手拉起来（ACK 握手），再**只关掉主进程**让宿主自己优雅退出，
 最后把 `DeepSeek Harness.exe` 重新拉起来；重启结果会写成回执，下次打开设置页就能看到「上次重启成没成」。
 
 ## 功能特性
 
-- **三个入口，同一套逻辑**：侧边栏底部图标、设置页「重启应用」区块、斜杠命令 `/restart`（另有 `--force` / `--wait`）。
+- **五个入口，同一套逻辑**：侧边栏面板（点左上角那一项切到主区的重启面板页）、侧边栏底部图标、会话标题栏按钮、
+  设置 → 通用 里的一行、斜杠命令 `/restart`（另有 `--force` / `--wait`）。
+- **每个入口可单独开关**（v1.2）：设置 → 重启应用 里有 4 个开关（面板 / 底部按钮 / 标题栏 / 设置行），关掉即**撤销槽位注册**；
+  斜杠命令不参与开关。开关状态是**本机（本浏览器）偏好**，存 `localStorage`，默认值仍读配置文件。
 - **不会误杀**：派发后先等助手回 ACK；**拿不到 ACK 就报错返回，绝不杀任何进程**（`500 helper-not-responding`）。
 - **只关主进程**：助手执行 `taskkill /PID <主进程> /F`，**不带 `/T`**——宿主因 IPC 断开自己优雅退出、会话日志照常落盘。
 - **不依赖系统 Node**：用应用自身 exe 当 node（`ELECTRON_RUN_AS_NODE=1`），不碰系统 PATH，也不用安装目录里的 runtime。
@@ -14,7 +18,7 @@ DSH 桌面版一键重启插件：**三个入口**——侧边栏底部图标、
   插件管理器正在装插件时硬拦（409 `installing`）。
 - **重启回执**：成功写「已完成，停机约 N 秒」，失败写原因；设置页与探测口都能读到。
 - **版本自检**：设置页显示「DSH `<version>` · `<range>`」，不满足 `>=0.2.0` 时红字提示。
-- **中英双语**：界面文案跟随宿主语言（37 个键，中英字典键集合由测试保证一致）；语言取自 DSH 的 locale 服务，
+- **中英双语**：界面文案跟随宿主语言（50 个键，中英字典键集合由测试保证一致）；语言取自 DSH 的 locale 服务，
   在设置里切换语言即时生效。
 
 ## 工作原理
@@ -78,11 +82,24 @@ DSH 桌面版一键重启插件：**三个入口**——侧边栏底部图标、
 
 ### 客户端半边（`lib/client.js`）
 
-启动时探测环境，**仅 desktop 且平台为 win32** 才挂载 `sidebar.footer.action` 与 `settings.section` 两个槽位；web 环境零挂载。
-文案中英双语（`STRINGS.zh` / `STRINGS.en`，37 键，键集合一致由单测强制）。**语言以 DSH 的 locale 服务为准**
+启动时探测环境，**仅 desktop 且平台为 win32** 才挂载入口；web 环境零挂载。v1.2 起注册 **6 个槽位条目**——五个入口里的四个界面入口（其中侧栏面板是 `panellist` + `main` 两个槽位）+ 一个恒注册的设置页区块：
+
+| 槽位 | order | 作用 |
+| --- | --- | --- |
+| `sidebar.panellist` + `main` | 60 / — | 侧栏面板项 + 它切过去的主区面板页，**必须成对注册**（`selectPanel(key)` 找不到 key 会抛错）；面板项组件只画图标，整行由侧栏渲染 |
+| `sidebar.footer.action` | 100 | 侧边栏底部动作按钮（v1.1 起就有） |
+| `conversation.session.header.actions` | 15 | 会话标题栏按钮；**order 15 故意排在官方 ui-jobs（20）之前**，否则动作组会被挤到右侧 |
+| `settings.general.item` | 91 | 设置 → 通用 里的「左文案 + 右按钮」一行 |
+| `settings.section` | 900 | 插件自己的配置页（**不算入口，恒定注册**——否则用户把入口全关了就再也回不来） |
+
+入口开关存本机 `localStorage` 的 `dsh-restart-now:entries`（`{panel, footer, header, settingsRow}` 四个布尔），
+关掉一个即调用 disposer **撤销该槽位注册**，不做「注册后隐藏」；插件卸载时全部经 `ctx.effect` 回收。
+
+文案中英双语（`STRINGS.zh` / `STRINGS.en`，50 键，键集合一致由单测强制）。**语言以 DSH 的 locale 服务为准**
 （`locale.getSnapshot().active` → `<html lang>` → `navigator.languages` → `en`；服务异步就绪，故另有
-`<html lang>` 属性观察兜底）：在 设置 → 通用 里切换语言，两个入口即时跟随。槽位 `label` 是函数 `navLabel()`；
-导航图标认领同时匹配中英两种标签。
+`<html lang>` 属性观察兜底）：在 设置 → 通用 里切换语言，各入口即时跟随。槽位 `label` 是函数 `navLabel()`；
+导航图标认领同时匹配中英两种标签。面板页主按钮优先用官方 `@deepseek-ai/dsh-client-ui-primitives` 的 `Button`
+（`try { require(...) }` 包住，取不到就退回自绘 `.dsrn-button`）。
 
 ### 斜杠命令
 
@@ -104,11 +121,17 @@ DSH 桌面版一键重启插件：**三个入口**——侧边栏底部图标、
 | --- | --- | --- |
 | `allowRestart` | `true` | 总开关，false 时动作口返回 403 disabled |
 | `confirm` | `true` | 点击后二次确认 |
-| `hideSidebarButton` | `false` | 隐藏侧栏底部重启入口（保存后立即生效） |
+| `hideSidebarButton` | `false` | 底部入口的默认可见性（v1.2 起＝底部开关的**默认值**，开关本身存 localStorage；保存后立即生效） |
 | `exePath` | `''` | exe 绝对路径；留空时从当前安装位置自动推导 |
 
 **v1.1 起只有 4 键**：原第 5 键 `delayMs`（应答后到杀树的延时）已删除——用户要求「不给反悔的机会，尽可能快」，
 现在固定为「等助手 ACK（≤800ms）」。旧配置文件里残留的 `delayMs` 会被静默忽略，不影响启动。
+
+**入口可见性是本机偏好（v1.2）**：哪个入口显示、哪个不显示，存在**本机浏览器的 `localStorage`**
+（键 `dsh-restart-now:entries`，值为 `{panel, footer, header, settingsRow}` 的布尔对象），不进配置文件、不跨机器同步。
+配置文件的 `hideSidebarButton` 因此退化为**底部入口的默认值**（写 `true` 时首次加载即关闭底部按钮，旧配置照旧生效）；
+其余三个入口默认开启。切换底部开关时会把四键配置整体写回 `/config`（`hideSidebarButton = !enabled`），
+让这个默认值在重装或换机后仍然成立；写回失败则静默忽略（本机开关已经生效）。
 
 ## 安装
 
@@ -134,7 +157,7 @@ DSH CLI 会通过 pnpm 从 npm 安装插件，并将其登记到桌面 profile�
 ## 开发
 
 ```powershell
-npm test            # node:test；12 个文件 93 个用例，零进程副作用、无需运行中的宿主
+npm test            # node:test；12 个文件 101 个用例，零进程副作用、无需运行中的宿主
 npm pack --dry-run  # 校验 tarball 内容（CI 同样会跑）
 ```
 
