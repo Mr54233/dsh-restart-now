@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ARTIFACT_RE, artifactPaths, buildHelperScript, buildHelperSpawn, resolveExe, RESPAWN_ENV_DROP,
+  relaunchArgsFrom, tokenizeCommandLine,
 } from '../lib/helper-src.js';
 
 const EXE = 'D:\\dsh\\DeepSeek Harness.exe';
@@ -80,16 +81,21 @@ test('U1 助手时序与关键调用', () => {
   assert.ok(script.includes('const ENV_DROP = '), '删除清单须注入脚本（v1.2.1）');
   assert.ok(script.includes('for (const key of ENV_DROP)'), '按清单循环删除，避免逐条手写漏项');
   assert.ok(script.includes('delete env[key]'), '逐键删除而不是整块覆盖（保留 DSH_HOME 等安装身份）');
-  assert.ok(script.includes('spawn(EXE, []'), '拉起目标是 exe 本体');
+  assert.ok(script.includes('spawn(EXE, args, '), '拉起目标是 exe 本体（v1.2.1 起带原始启动参数）');
   assert.ok(script.includes('detached: true'), '新实例须 detached');
   assert.ok(script.includes('ALIVE_MS'), '每次拉起后须做存活验证');
   assert.ok(script.includes('ATTEMPTS'), '失败须重试');
 
-  // v1.1 回归哨兵：WMI / VBS / PowerShell 派发层必须彻底消失
+  // v1.1 回归哨兵：WMI/VBS/PowerShell 的**派发层**必须彻底消失。
+  // v1.2.1 起允许一处只读探测（readLaunchArgs 读主进程命令行），但那不参与派发：
+  // 派发仍是 detached spawn(应用 exe)。所以这里禁的是派发形态（wscript / Invoke-CimMethod / .vbs），
+  // 以及编码不可靠的 wmic（OEM 码页会毁掉带中文的启动参数）。
   const lowered = script.toLowerCase();
-  for (const gone of ['wscript', 'invoke-cimmethod', 'win32_process', 'powershell', '.vbs']) {
+  for (const gone of ['wscript', 'invoke-cimmethod', '.vbs', 'wmic']) {
     assert.ok(!lowered.includes(gone), `v1.1 起不应再出现 ${gone}`);
   }
+  // 探测只允许出现一次，且必须带超时（不能卡住重启）
+  assert.equal(lowered.split('get-ciminstance').length - 1, 1, 'WMI 只允许这一处只读探测');
 });
 
 test('U2 路径转义安全（JSON round-trip）+ 生成脚本语法合法', () => {
@@ -144,4 +150,46 @@ test('U9 artifactPaths：helper/ack/errLog 共用同一 stamp（便于成组清�
     const name = file.split('\\').pop();
     assert.ok(ARTIFACT_RE.test(name), `prune 正则须能识别 ${name}`);
   }
+});
+
+test('U11 启动参数复用（v1.2.1）：从主进程命令行里取，三重校验不过就放弃', () => {
+  const exe = 'D:\dsh\DeepSeek Harness.exe';
+  // 正常形态：引号包裹的 exe + 用户参数
+  assert.deepEqual(
+    tokenizeCommandLine('"D:\dsh\DeepSeek Harness.exe" --user-data-dir="D:\my data" -x'),
+    ['D:\dsh\DeepSeek Harness.exe', '--user-data-dir=D:\my data', '-x'],
+    '引号包裹的参数要被还原成一个 token',
+  );
+  assert.deepEqual(tokenizeCommandLine('  a   b\tc  '), ['a', 'b', 'c'], '连续空白不产生空 token');
+  assert.deepEqual(tokenizeCommandLine(''), [], '空串没有 token');
+
+  assert.deepEqual(
+    relaunchArgsFrom('"D:\dsh\DeepSeek Harness.exe" --user-data-dir=D:\my', exe),
+    ['--user-data-dir=D:\my'],
+    '同一个 exe 的普通参数原样复用',
+  );
+  assert.deepEqual(relaunchArgsFrom('"D:\dsh\DeepSeek Harness.exe"', exe), [],
+    '没有参数也要复用「确实是这个 exe」这个结论（返回空数组而非 null）');
+  assert.equal(relaunchArgsFrom(null, exe), null, '问不出来（WMI 失败）→ 放弃');
+  assert.equal(relaunchArgsFrom('   ', exe), null, '空命令行 → 放弃');
+  assert.equal(relaunchArgsFrom('"D:\other\App.exe" --x', exe), null,
+    '第 0 段不是同一个 exe → 放弃（同名多份安装时别拉错程序）');
+  assert.equal(relaunchArgsFrom('"D:\dsh\DeepSeek Harness.exe" --type=renderer', exe), null,
+    '--type= 说明抓到的是 Chromium 子进程，不是用户启动 → 放弃');
+  assert.equal(relaunchArgsFrom('"D:\dsh\DeepSeek Harness.exe" --expose-internals x.js', exe), null,
+    '--expose-internals 说明抓到的是 desktop-host，转发会拉起无窗口进程 → 放弃');
+  assert.equal(relaunchArgsFrom('"D:\dsh\DeepSeek Harness.exe" "a\\"b"', exe), null,
+    '带转义引号的命令行不做有损解析 → 放弃');
+});
+
+test('U11b 助手脚本真的会去问 WMI、并把结果当参数拉起（而不是用空参数）', () => {
+  const script = makeScript();
+  assert.ok(script.includes('Get-CimInstance -ClassName Win32_Process -Filter'), '须从进程表读主进程命令行');
+  assert.ok(script.includes('readLaunchArgs()'), '须有探测调用');
+  assert.ok(script.includes('relaunchArgsFrom(rawCommandLine, EXE)'), '须经三重校验');
+  assert.ok(script.includes('spawn(EXE, args, '), '拉起时须带参数，不再写死空数组');
+  assert.ok(script.includes("'launch_args=unavailable'"), '问不到须留痕（区分「没参数」与「没问到」）');
+  assert.ok(/function (?:tokenizeCommandLine|relaunchArgsFrom)\(/.test(script),
+    '解析逻辑须内联进脚本（助手不能 import 模块）');
+  assert.doesNotThrow(() => new Function(script.replace(/^'use strict';/, '')), '注入后仍是合法 JS');
 });
