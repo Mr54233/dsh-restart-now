@@ -10,11 +10,11 @@ function makeDir() {
   return mkdtempSync(join(tmpdir(), 'dsh-prune-test-'));
 }
 
-/** 写一组某次重启的三个运行时文件，返回文件名列表 */
+/** 写一组某次重启的三个运行时文件（v1.1：helper .cjs + ack + err.log；v0.9 的 .vbs 派发器已废） */
 function writeStampSet(dir, stamp) {
   const names = [
     `dsh-restart-now-helper-${stamp}.cjs`,
-    `dsh-restart-now-dispatch-${stamp}.vbs`,
+    `dsh-restart-now-helper-${stamp}.ack`,
     `dsh-restart-now-${stamp}.err.log`,
   ];
   for (const n of names) writeFileSync(join(dir, n), 'x');
@@ -53,6 +53,7 @@ test('U14b: 只匹配本插件前缀 + 时间戳形态，别的临时文件（�
     'node.exe',                             // 完全无关
     'dsh-restart-now-helper-bad.cjs',       // 无时间戳段
     'dsh-restart-now-2026-10-01T00-00-99.cjs.tmp', // 后缀不符
+    'dsh-restart-now-dispatch-2026-10-01T00-00-01.vbs', // v0.9 遗留派发器：已不在匹配集内，交给用户/系统清理
   ];
   for (const n of innocents) writeFileSync(join(dir, n), 'keep-me');
   const r = pruneRestartArtifacts(dir, 2);

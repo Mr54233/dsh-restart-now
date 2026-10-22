@@ -15,9 +15,9 @@ let dir = '';
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'dsh-restart-now-u12-')); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-test('U12a DEFAULTS 冻结且五键正确', () => {
+test('U12a DEFAULTS 冻结且四键正确（v1.1 删 delayMs）', () => {
   assert.deepEqual({ ...DEFAULTS }, {
-    allowRestart: true, confirm: true, delayMs: 50, exePath: '', hideSidebarButton: false,
+    allowRestart: true, confirm: true, exePath: '', hideSidebarButton: false,
   });
   assert.throws(() => { 'use strict'; DEFAULTS.allowRestart = false; }, TypeError);
 });
@@ -45,10 +45,9 @@ test('U12b resolveConfigFile 优先级 DSH_PROFILE_DIR > DSH_HOME/profiles/<name
 
 test('U12c clampConfig 只收合法键并收紧类型', () => {
   assert.deepEqual(clampConfig({ allowRestart: false, confirm: true, delayMs: 123.7, exePath: '  x.exe  ' }),
-    { allowRestart: false, confirm: true, delayMs: 124, exePath: 'x.exe' });
+    { allowRestart: false, confirm: true, exePath: 'x.exe' }, 'v1.1 起 delayMs 属未知键，被丢弃');
   assert.deepEqual(clampConfig({ hideSidebarButton: true }), { hideSidebarButton: true }, 'v0.12 第 5 键');
-  assert.deepEqual(clampConfig({ delayMs: 999999 }), { delayMs: 60000 }, '上界 60000');
-  assert.deepEqual(clampConfig({ delayMs: -5 }), { delayMs: 0 }, '下界 0');
+  assert.deepEqual(clampConfig({ delayMs: 999999 }), {}, 'delayMs 已是未知键');
   assert.deepEqual(clampConfig({ evil: 1, delayMs: '100', hideSidebarButton: 'yes' }), {}, '未知键与非布尔值丢弃');
   assert.deepEqual(clampConfig(null), {});
   assert.deepEqual(clampConfig('x'), {});
@@ -66,26 +65,25 @@ test('U12d loadFileConfig 缺失/损坏 → {}', () => {
 
 test('U12e saveFileConfig 原子语义（写即合法 JSON）+ 返回 clamp 结果', () => {
   const f = join(dir, 'restart-now.config.json');
-  const saved = saveFileConfig(f, { allowRestart: false, delayMs: 250, junk: 'x' });
-  assert.deepEqual(saved, { allowRestart: false, delayMs: 250 });
+  const saved = saveFileConfig(f, { allowRestart: false, confirm: false, junk: 'x' });
+  assert.deepEqual(saved, { allowRestart: false, confirm: false });
   assert.ok(existsSync(f));
-  assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { allowRestart: false, delayMs: 250 });
+  assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { allowRestart: false, confirm: false });
 });
 
 test('U12f effectiveConfig 三层合并：默认 < patch < 文件', () => {
   const f = join(dir, 'restart-now.config.json');
-  saveFileConfig(f, { delayMs: 750, hideSidebarButton: true });
+  saveFileConfig(f, { confirm: false, hideSidebarButton: true });
   const eff = effectiveConfig({ allowRestart: false, exePath: 'patch.exe' }, f);
   assert.deepEqual(eff, {
     allowRestart: false,        // patch 层
-    confirm: true,              // 默认层
-    delayMs: 750,               // 文件层压过默认
+    confirm: false,             // 文件层压过默认
     exePath: 'patch.exe',       // patch 层
     hideSidebarButton: true,    // 文件层压过默认
   });
-  // 无文件时 patch 直接生效（v0.18 默认延时 50）
+  // 无文件时 patch 直接生效（v1.1：四键，无 delayMs）
   assert.deepEqual(effectiveConfig({ confirm: false }, join(dir, 'none.json')),
-    { allowRestart: true, confirm: false, delayMs: 50, exePath: '', hideSidebarButton: false });
+    { allowRestart: true, confirm: false, exePath: '', hideSidebarButton: false });
 });
 
 // —— U13 系列（v0.17）：isUsableExePath —— exePath 双闸的判据 ——
@@ -114,3 +112,4 @@ test('U13d: 真机教训值 c/ → false（Windows 下被当相对路径解析�
   assert.equal(isUsableExePath('c/'), false);
   assert.equal(isUsableExePath('Z:\\definitely-not-exist\\nope.exe'), false);
 });
+

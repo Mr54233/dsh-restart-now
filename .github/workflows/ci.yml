@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # 产品只支持 Windows（重启链路是 taskkill / Job 对象 / Electron exe 当 node 这些纯 Win32 机制），
+    # 单测里也有 Windows 路径与 pid 形态的断言，所以 CI 跑 windows 才有意义。
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Show runtime
+        run: node --version; npm --version
+      - name: Unit tests (no side effects, no host needed)
+        run: npm test
+      - name: Package manifest sanity
+        shell: pwsh
+        run: |
+          # 插件包的关键声明：bundle patch 文件必须存在，其余是市场卡片/双语描述需要的资源。
+          # （engines.dsh 与 SUPPORTED_RANGE 的一致性由 version.test.js 断言）
+          $raw = npm pack --dry-run --json 2>$null | Out-String
+          # npm 偶尔在 JSON 前面打 warning，从第一个 [ 开始截
+          $raw = $raw.Substring($raw.IndexOf('['))
+          $pack = $raw | ConvertFrom-Json
+          $files = $pack[0].files.path
+          foreach ($need in @('package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js', 'icon.svg', 'locale/en.json', 'locale/zh.json')) {
+            if ($files -notcontains $need) { throw "tarball 缺少 $need" }
+          }
+          "tarball files: $($files.Count)"

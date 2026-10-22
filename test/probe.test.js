@@ -49,11 +49,16 @@ test('U15a: 探测口回传 environment + 生效配置（patch 值可见）+ der
   assert.equal(body.platform, process.platform, 'v1.0.2 起探测口回传平台（客户端据此在非 win32 零挂载）');
   assert.equal(body.config.confirm, false, 'patch 层配置进入生效配置');
   assert.equal(typeof body.config.allowRestart, 'boolean');
-  assert.equal(typeof body.config.delayMs, 'number');
+  assert.ok(!('delayMs' in body.config), 'v1.1 删掉 delayMs（用户：不给反悔机会，尽可能快）');
   assert.ok('exePath' in body.config);
   assert.ok('hideSidebarButton' in body.config);
   assert.equal(typeof body.derivedExe, 'string');
   assert.ok(body.derivedExe.length > 0, 'derivedExe 非空（resolveExe 总有输出）');
+  // v1.1 新增：版本判定 + 上次重启回执 + 等待模式快照
+  assert.equal(body.supportedRange, '>=0.2.0');
+  assert.ok('version' in body && 'supported' in body);
+  assert.ok('lastRestart' in body && typeof body.lastRestart === 'object');
+  assert.equal(body.wait.state, 'idle');
 });
 
 test('U15b: 探测口方法白名单 GET（POST → 405）', async () => {

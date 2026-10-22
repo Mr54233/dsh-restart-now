@@ -1,7 +1,7 @@
 {
   "name": "dsh-restart-now",
-  "version": "1.0.3",
-  "description": "Restart DSH Desktop from the sidebar or Settings. After confirmation, closes and relaunches the app; only active in the desktop host. · DSH 桌面版一键重启：从侧栏或设置页发起，确认后关闭并重新拉起应用；仅在桌面宿主生效。",
+  "version": "1.1.0",
+  "description": "Restart DSH Desktop from the sidebar, Settings or /restart. Waits for a detached helper to confirm, closes the app gracefully, then relaunches it. · DSH 桌面版一键重启：侧栏/设置页/斜杠命令三个入口，助手确认后优雅关闭并自动拉起；目前仅 Windows。",
   "icon": "icon.svg",
   "license": "MIT",
   "type": "module",
@@ -20,7 +20,7 @@
     "locale/*.json"
   ],
   "scripts": {
-    "test": "node --test test/helper.test.js test/guard.test.js test/environment.test.js test/config-store.test.js test/schema.test.js test/prune.test.js test/probe.test.js"
+    "test": "node --test test/helper.test.js test/guard.test.js test/environment.test.js test/config-store.test.js test/schema.test.js test/prune.test.js test/probe.test.js test/tasks.test.js test/version.test.js test/receipt.test.js test/dispatch.test.js test/client-smoke.test.js"
   },
   "dsh": {
     "bundle": {
@@ -52,7 +52,7 @@
   },
   "author": "Mr54233",
   "engines": {
-    "dsh": ">=0.1.0"
+    "dsh": ">=0.2.0"
   },
   "os": [
     "win32"
