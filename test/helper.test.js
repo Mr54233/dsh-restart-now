@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ARTIFACT_RE, artifactPaths, buildHelperScript, buildHelperSpawn, resolveExe, RESPAWN_ENV_DROP,
-  relaunchArgsFrom, tokenizeCommandLine,
+  portFromWebUrl, relaunchArgsFrom, tokenizeCommandLine,
 } from '../lib/helper-src.js';
 
 const EXE = 'D:\\dsh\\DeepSeek Harness.exe';
@@ -216,4 +216,31 @@ test('U12b 弹窗文案的引号必须按 PowerShell 规则转义（反斜杠不
   assert.ok(!script.includes('JSON.stringify(message)'), '不得用 JSON 转义拼 PowerShell 字符串');
   assert.ok(script.includes(".replace(/'/g, \"''\")"), '单引号字面量里须把 \' 写成 \'\'');
   assert.ok(script.includes('Add-Type -AssemblyName PresentationFramework'), '消息框来自 WPF 程序集');
+});
+
+test('U13 端口回探（v1.2.1 第 6 项）：只观测「服务回来了没」，绝不当成功判据', () => {
+  // 端口解析：只认 DSH_WEB_URL 里的端口
+  assert.equal(portFromWebUrl('http://127.0.0.1:56355/?token=abc'), 56355, '带 token 也要取到端口');
+  assert.equal(portFromWebUrl('https://127.0.0.1:1234'), 1234);
+  assert.equal(portFromWebUrl('http://127.0.0.1'), 80, '省略端口时按协议默认');
+  assert.equal(portFromWebUrl('https://127.0.0.1'), 443);
+  for (const bad of ['', '   ', 'nonsense', null, undefined, 'http://127.0.0.1:0', 'http://127.0.0.1:70000 x']) {
+    assert.equal(portFromWebUrl(bad), null, `解析不出来就跳过观测：${String(bad)}`);
+  }
+
+  const withPort = makeScript({ webUrl: 'http://127.0.0.1:56355/?token=abc' });
+  assert.ok(withPort.includes('const PORT = 56355'), '端口须注入脚本');
+  assert.ok(withPort.includes("'port_relisten='"), '观测结论须进日志');
+  assert.ok(withPort.includes("skipped (no web url)"), '没有 web 地址时要明确跳过，不能静默');
+  assert.ok(withPort.includes('net.connect'), '用真实 TCP 连接判定，不靠端口文件或 netstat');
+  assert.ok(withPort.includes('RELISTEN_MS'), '等待窗口须可配（测试/调优）');
+
+  const noUrl = makeScript();
+  assert.ok(noUrl.includes('const PORT = null'), '拿不到地址时 PORT 为 null（跳过）');
+
+  // 顺序：先写回执（重启成不成已经定了）再观测端口 —— 观测慢不能拖着回执不写
+  const receiptIndex = withPort.indexOf('respawnedAt');
+  const probeIndex = withPort.indexOf("perf('port_relisten=");
+  assert.ok(receiptIndex > 0 && probeIndex > receiptIndex, '回执先落，再观测');
+  assert.doesNotThrow(() => new Function(withPort.replace(/^'use strict';/, '')), '注入后仍是合法 JS');
 });
