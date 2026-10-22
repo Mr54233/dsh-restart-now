@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ARTIFACT_RE, artifactPaths, buildHelperScript, buildHelperSpawn, resolveExe, RESPAWN_ENV_DROP,
-  portFromWebUrl, relaunchArgsFrom, tokenizeCommandLine,
+  relaunchArgsFrom, tokenizeCommandLine, webListenScript,
 } from '../lib/helper-src.js';
 
 const EXE = 'D:\\dsh\\DeepSeek Harness.exe';
@@ -94,8 +94,12 @@ test('U1 助手时序与关键调用', () => {
   for (const gone of ['wscript', 'invoke-cimmethod', '.vbs', 'wmic']) {
     assert.ok(!lowered.includes(gone), `v1.1 起不应再出现 ${gone}`);
   }
-  // 探测只允许出现一次，且必须带超时（不能卡住重启）
-  assert.equal(lowered.split('get-ciminstance').length - 1, 1, 'WMI 只允许这一处只读探测');
+  // v1.2.1 起允许两处只读探测（readLaunchArgs 读主进程命令行、waitWebListen 查进程树监听），
+  // 二者都不参与派发：派发仍是 detached spawn(应用 exe)。所以这里禁的是派发形态
+  // （wscript / Invoke-CimMethod / .vbs），以及编码不可靠的 wmic（OEM 码页会毁掉带中文的启动参数）。
+  // 探测必须带超时（不能卡住重启）。
+  assert.equal(lowered.split('get-ciminstance').length - 1, 2, 'WMI 只允许这两处只读探测');
+  assert.ok(lowered.includes('timeout:'), '探测须带超时，不能卡住重启');
 });
 
 test('U2 路径转义安全（JSON round-trip）+ 生成脚本语法合法', () => {
@@ -218,29 +222,29 @@ test('U12b 弹窗文案的引号必须按 PowerShell 规则转义（反斜杠不
   assert.ok(script.includes('Add-Type -AssemblyName PresentationFramework'), '消息框来自 WPF 程序集');
 });
 
-test('U13 端口回探（v1.2.1 第 6 项）：只观测「服务回来了没」，绝不当成功判据', () => {
-  // 端口解析：只认 DSH_WEB_URL 里的端口
-  assert.equal(portFromWebUrl('http://127.0.0.1:56355/?token=abc'), 56355, '带 token 也要取到端口');
-  assert.equal(portFromWebUrl('https://127.0.0.1:1234'), 1234);
-  assert.equal(portFromWebUrl('http://127.0.0.1'), 80, '省略端口时按协议默认');
-  assert.equal(portFromWebUrl('https://127.0.0.1'), 443);
-  for (const bad of ['', '   ', 'nonsense', null, undefined, 'http://127.0.0.1:0', 'http://127.0.0.1:70000 x']) {
-    assert.equal(portFromWebUrl(bad), null, `解析不出来就跳过观测：${String(bad)}`);
-  }
+test('U13 web 服务回探（v1.2.1 第 6 项）：查新实例进程树有没有人在 LISTEN，绝不当成功判据', () => {
+  // 判据不看端口号：实测每次启动端口都变（56355 → 57042 → 55843），
+  // 连旧端口只会在每次成功重启后误报超时。
+  const script = makeScript();
+  assert.ok(script.includes("'web_listen='"), '观测结论须进日志');
+  assert.ok(script.includes('Get-NetTCPConnection -State Listen'), '用系统监听表判定，不猜端口');
+  assert.ok(script.includes('ParentProcessId='), 'web 服务在宿主子进程里，须按进程树查');
+  assert.ok(script.includes('WEB_LISTEN_MS'), '等待窗口须可配（测试/调优）');
+  assert.ok(!script.includes('port_relisten'), '旧的「连旧端口」判据须已移除');
+  assert.ok(!script.includes('portFromWebUrl'), '不再依赖 DSH_WEB_URL 取端口');
 
-  const withPort = makeScript({ webUrl: 'http://127.0.0.1:56355/?token=abc' });
-  assert.ok(withPort.includes('const PORT = 56355'), '端口须注入脚本');
-  assert.ok(withPort.includes("'port_relisten='"), '观测结论须进日志');
-  assert.ok(withPort.includes("skipped (no web url)"), '没有 web 地址时要明确跳过，不能静默');
-  assert.ok(withPort.includes('net.connect'), '用真实 TCP 连接判定，不靠端口文件或 netstat');
-  assert.ok(withPort.includes('RELISTEN_MS'), '等待窗口须可配（测试/调优）');
+  // 探测脚本本身：pid / 超时 / 轮询都会被固化进脚本，且只回 ok|timeout
+  const probe = webListenScript(1234, 5000, 250);
+  assert.ok(probe.indexOf('$main = 1234') >= 0, 'pid 须固化');
+  assert.ok(probe.indexOf('AddMilliseconds(5000)') >= 0, '超时须固化');
+  assert.ok(probe.indexOf('Start-Sleep -Milliseconds 250') >= 0, '轮询间隔须固化');
+  assert.ok(probe.indexOf('"ok " + $hit.LocalPort') >= 0, '命中须回 ok 与端口');
+  assert.ok(probe.indexOf('"timeout"') >= 0, '未命中须回 timeout');
+  assert.doesNotThrow(() => webListenScript('not-a-number', 0, 0), '脏输入不得抛');
 
-  const noUrl = makeScript();
-  assert.ok(noUrl.includes('const PORT = null'), '拿不到地址时 PORT 为 null（跳过）');
-
-  // 顺序：先写回执（重启成不成已经定了）再观测端口 —— 观测慢不能拖着回执不写
-  const receiptIndex = withPort.indexOf('respawnedAt');
-  const probeIndex = withPort.indexOf("perf('port_relisten=");
+  // 顺序：先写回执（重启成不成已经定了）再观测 —— 观测慢不能拖着回执不写
+  const receiptIndex = script.indexOf('respawnedAt');
+  const probeIndex = script.indexOf("perf('web_listen=");
   assert.ok(receiptIndex > 0 && probeIndex > receiptIndex, '回执先落，再观测');
-  assert.doesNotThrow(() => new Function(withPort.replace(/^'use strict';/, '')), '注入后仍是合法 JS');
+  assert.doesNotThrow(() => new Function(script.replace(/^'use strict';/, '')), '注入后仍是合法 JS');
 });
