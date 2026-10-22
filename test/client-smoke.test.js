@@ -492,3 +492,18 @@ test('U21m v1.2 入口文案两语言齐备（含面板/标题栏/设置行/入�
     assert.ok(hits >= 2, `文案键 ${key} 应同时出现在 zh 与 en 里`);
   }
 });
+
+test('U21n 窄栏兜底：注入的 CSS 必须带 nowrap 规则，且图标带 data-dsrn-glyph 标记', () => {
+  // 背景（v1.2.1 真机缺陷）：panellist 的文字由宿主自己画。codex-ui 的扩展列表是
+  // `button > span.dcu-menu-icon > svg` + 一个裸文本节点（匿名 flex/grid 项），
+  // 侧栏变窄时该列被压到约 1 字宽 → 「重启应用」逐字竖排（用户截图实证）。
+  // 匿名文本项无法直接选中，只能靠父级 white-space 继承兜底，所以断言规则与标记同时存在。
+  const { appendedStyles } = load({ probeBody: DESKTOP_PROBE });
+  const ours = appendedStyles.filter((tag) => tag.dataset && tag.dataset.plugin === 'dsh-restart-now');
+  assert.ok(ours.length >= 1, '至少注入一份插件样式');
+  const css = ours.map((tag) => tag.textContent || '').join('\n');
+  assert.match(css, /button:has\(>span>svg\[data-dsrn-glyph\]\)\{white-space:nowrap/,
+    '缺 nowrap 兜底规则：窄侧栏里 panellist 文案会竖排');
+  assert.match(source, /attrs\['data-dsrn-glyph'\]/, '图标必须带 data-dsrn-glyph 标记，规则才会命中');
+  assert.match(source, /medium: true, glyph: true/, 'panellist/侧栏图标需开启 glyph 标记');
+});

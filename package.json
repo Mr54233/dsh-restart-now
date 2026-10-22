@@ -1,6 +1,6 @@
 {
   "name": "dsh-restart-now",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Restart DSH Desktop from five entries: sidebar panel, sidebar footer, conversation header, the Settings general row and /restart. Waits for a detached helper to confirm, closes the app gracefully, then relaunches it. · DSH 桌面版一键重启：侧栏面板/侧栏底部/会话标题栏/设置通用行/斜杠命令五个入口，每个入口可在设置页单独开关；助手确认后优雅关闭并自动拉起；目前仅 Windows。",
   "icon": "icon.svg",
   "license": "MIT",
