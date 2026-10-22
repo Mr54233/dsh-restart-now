@@ -122,15 +122,26 @@ DSH 桌面版一键重启插件（v1.2.0）：**五个入口**——侧边栏面
 | `allowRestart` | `true` | 总开关，false 时动作口返回 403 disabled |
 | `confirm` | `true` | 点击后二次确认 |
 | `hideSidebarButton` | `false` | 底部入口的默认可见性（v1.2 起＝底部开关的**默认值**，开关本身存 localStorage；保存后立即生效） |
+| `platformAuth` | `true` | **v1.2.1**：只允许本应用界面操作重启，本机其它程序直接调用接口会被拒（401/403）。界面自身失效时可置 `false` 自救 |
 | `exePath` | `''` | exe 绝对路径；留空时从当前安装位置自动推导 |
 
-**v1.1 起只有 4 键**：原第 5 键 `delayMs`（应答后到杀树的延时）已删除——用户要求「不给反悔的机会，尽可能快」，
+**v1.2.1 起 5 键**：新增 `platformAuth`（默认 `true`）。此前动作口只有「围栏」检查（来源必须是本机回环），
+本机任意进程都能 `curl` 一下把应用重启掉；现在动作口、配置口、状态口都会先向宿主平台要一次会话判定，
+未带有效会话凭据直接 `401`，来源不可信 `403`。判定不可用（旧版宿主无此 API）或平台调用异常时一律**放行**，
+不会把插件变成砖。诊断结论在探测口 `/environment` 的 `platformAuth` 字段里，`verdict` 取值
+`ok`/`unauthorized`/`forbidden`/`rejected`/`skipped`/`bypassed`/`error`。
+
+**重启环境清理（v1.2.1）**：拉起新进程前会删掉 `ELECTRON_RUN_AS_NODE`、`DSH_SESSION_ID`、`DSH_WEB_URL`、`DSH_SHELL`
+——这些描述的是「上一次运行/会话」的事实，继承下去会让新实例带着旧端口、旧会话 id 和 shell 标记跑；
+`DSH_HOME`/`DSH_PROFILE`/`DSH_PROFILE_DIR` 属安装身份，一律保留。实际删掉了哪几个会写进日志（`env_dropped=`）。
+
+**v1.1 起删掉了 `delayMs`**：原第 5 键 `delayMs`（应答后到杀树的延时）已删除——用户要求「不给反悔的机会，尽可能快」，
 现在固定为「等助手 ACK（≤800ms）」。旧配置文件里残留的 `delayMs` 会被静默忽略，不影响启动。
 
 **入口可见性是本机偏好（v1.2）**：哪个入口显示、哪个不显示，存在**本机浏览器的 `localStorage`**
 （键 `dsh-restart-now:entries`，值为 `{panel, footer, header, settingsRow}` 的布尔对象），不进配置文件、不跨机器同步。
 配置文件的 `hideSidebarButton` 因此退化为**底部入口的默认值**（写 `true` 时首次加载即关闭底部按钮，旧配置照旧生效）；
-其余三个入口默认开启。切换底部开关时会把四键配置整体写回 `/config`（`hideSidebarButton = !enabled`），
+其余三个入口默认开启。切换底部开关时会把当前配置整体写回 `/config`（`hideSidebarButton = !enabled`，其余键取上次保存的值），
 让这个默认值在重装或换机后仍然成立；写回失败则静默忽略（本机开关已经生效）。
 
 ## 安装

@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ARTIFACT_RE, artifactPaths, buildHelperScript, buildHelperSpawn, resolveExe,
+  ARTIFACT_RE, artifactPaths, buildHelperScript, buildHelperSpawn, resolveExe, RESPAWN_ENV_DROP,
 } from '../lib/helper-src.js';
 
 const EXE = 'D:\\dsh\\DeepSeek Harness.exe';
@@ -32,6 +32,24 @@ function makeScript(overrides = {}) {
     ...overrides,
   });
 }
+
+test('U10 拉起环境清理清单（v1.2.1）：只清「上一次运行」的事实，保留安装身份', () => {
+  // 判据：这些变量描述某一次运行/会话，跨进程继承等于把上一轮的事实带进下一轮。
+  assert.deepEqual([...RESPAWN_ENV_DROP],
+    ['ELECTRON_RUN_AS_NODE', 'DSH_SESSION_ID', 'DSH_WEB_URL', 'DSH_SHELL'],
+    '清单内容须锁定（改一项就是改行为）');
+  assert.ok(Object.isFrozen(RESPAWN_ENV_DROP), '清单须冻结，防止运行时被改');
+
+  // 安装身份必须保留：删掉它们新实例会退回默认 home / 默认 profile
+  for (const keep of ['DSH_HOME', 'DSH_PROFILE', 'DSH_PROFILE_DIR']) {
+    assert.ok(!RESPAWN_ENV_DROP.includes(keep), `${keep} 属安装身份，绝不能删`);
+  }
+
+  // 生成的脚本必须内嵌同一份清单（单一事实来源），并记录实际删掉了哪几个
+  const script = makeScript();
+  assert.ok(script.includes(JSON.stringify([...RESPAWN_ENV_DROP])), '脚本内嵌的清单须与常量一致');
+  assert.ok(script.includes("perf('env_dropped='"), '须在日志里留证：实际删掉了哪些键');
+});
 
 test('U1 助手时序与关键调用', () => {
   const script = makeScript();
@@ -57,8 +75,11 @@ test('U1 助手时序与关键调用', () => {
   assert.ok(script.includes('process.kill(pid, 0)'), '存活判定用 signal 0');
   assert.ok(script.includes("error.code === 'EPERM'"), 'EPERM 视为存活');
 
-  // 拉起：干净环境（否则新实例退化成 node 没有窗口）+ detached + 存活验证 + 重试
-  assert.ok(script.includes('delete env.ELECTRON_RUN_AS_NODE'), '拉起前必须删 ELECTRON_RUN_AS_NODE');
+  // 拉起：干净环境（否则新实例退化成 node 没有窗口，且会继承上一次运行的 DSH_* 事实）
+  //         + detached + 存活验证 + 重试
+  assert.ok(script.includes('const ENV_DROP = '), '删除清单须注入脚本（v1.2.1）');
+  assert.ok(script.includes('for (const key of ENV_DROP)'), '按清单循环删除，避免逐条手写漏项');
+  assert.ok(script.includes('delete env[key]'), '逐键删除而不是整块覆盖（保留 DSH_HOME 等安装身份）');
   assert.ok(script.includes('spawn(EXE, []'), '拉起目标是 exe 本体');
   assert.ok(script.includes('detached: true'), '新实例须 detached');
   assert.ok(script.includes('ALIVE_MS'), '每次拉起后须做存活验证');

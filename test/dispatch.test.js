@@ -245,14 +245,17 @@ test('U20h 探测口：非 desktop 也回 200 与完整快照（客户端靠它�
   assert.equal(body.platform, process.platform);
   assert.equal(typeof body.config, 'object');
   assert.deepEqual(Object.keys(body.config).sort(),
-    ['allowRestart', 'confirm', 'exePath', 'hideSidebarButton'], '配置只剩 4 键（delayMs 已删）');
+    ['allowRestart', 'confirm', 'exePath', 'hideSidebarButton', 'platformAuth'],
+    '配置只剩 5 键（delayMs 已删，v1.2.1 加 platformAuth）');
+  assert.equal(body.platformAuth.enforced, true, '探测口须回报鉴权结论');
+  assert.equal(body.platformAuth.verdict, 'bypassed', '无 connection 服务时按放行处理');
   assert.ok('lastRestart' in body);
   assert.equal(body.supportedRange, SUPPORTED_RANGE, '选择题 9：探测口须回传支持范围');
   assert.ok('version' in body && 'supported' in body, '探测口须回传运行时版本与是否支持');
   assert.equal(body.wait.state, 'idle');
 });
 
-test('U20i 配置路由：GET 回 4 键；POST 在非 desktop 下 403（写配置同样受环境门禁）', async () => {
+test('U20i 配置路由：GET 回 5 键；POST 在非 desktop 下 403（写配置同样受环境门禁）', async () => {
   const { ctx, route } = makeCtx({});
   plugin.apply(ctx, {});
   const config = route('GET', `${BASE}/config`);
@@ -318,6 +321,73 @@ test('U20k 命令 handler 参数解析：--force / --wait 被识别', async () =
   const cancel = await call(route('POST', `${BASE}/restart`),
     makeReq({ method: 'POST', url: `${BASE}/restart?cancel=1` }));
   assert.equal(cancel.statusCode, 200);
+});
+
+// ---- v1.2.1 平台会话鉴权（P0 缺口：本机任意进程 curl 动作口就能重启应用）----------
+
+test('U20m 平台 401 → 动作口/配置口/状态口全部拒绝，绝不派发', async () => {
+  const agents = { list: () => [] };
+  const jobs = { list: () => [] };
+  const connection = { requestRejection: async () => 401 };
+  const { ctx, route } = desktopCtx({ agents, jobs, connection });
+  plugin.apply(ctx, {});
+
+  const restart = await call(route('POST', `${BASE}/restart`), makeReq({ method: 'POST' }));
+  assert.equal(restart.statusCode, 401, '缺凭据是 401，不是 403');
+  assert.equal(restart.json().reason, 'unauthorized');
+  assert.ok(restart.json().hint.length > 0, '须给用户可读的原因（401 与 403 文案要分开）');
+
+  const status = await call(route('GET', `${BASE}/status`), makeReq({ url: `${BASE}/status` }));
+  assert.equal(status.statusCode, 401, '等待状态会暴露任务计数，同样要鉴权');
+
+  const config = await call(route('POST', `${BASE}/config`), makeReq({ method: 'POST', url: `${BASE}/config` }));
+  assert.equal(config.statusCode, 401, '写配置是状态变更，同样要鉴权');
+});
+
+test('U20n 平台 403 → 403 forbidden（与 401 语义分开）', async () => {
+  const connection = { requestRejection: () => 403 };
+  const { ctx, route } = desktopCtx({ connection });
+  plugin.apply(ctx, {});
+  const res = await call(route('POST', `${BASE}/restart`), makeReq({ method: 'POST' }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().reason, 'forbidden');
+});
+
+test('U20o platformAuth:false 逃生门 → 旁路平台（真机壳层不带 cookie 时用户可自救）', async () => {
+  let called = 0;
+  const connection = { requestRejection: () => { called += 1; return 401; } };
+  const agents = { list: () => [{ id: 'a1', status: 'running', inbox: { nextTurn: [], nextStep: [] } }] };
+  const jobs = { list: () => [] };
+  const { ctx, route } = desktopCtx({ agents, jobs, connection });
+  plugin.apply(ctx, { platformAuth: false });
+  const res = await call(route('POST', `${BASE}/restart`), makeReq({ method: 'POST' }));
+  assert.equal(called, 0, '关掉鉴权后不得再打平台');
+  assert.equal(res.statusCode, 409, '须放行到后续门禁（有活跃任务 → busy）');
+  assert.equal(res.json().reason, 'busy');
+});
+
+test('U20p 平台抛异常 → 不拦截（插件不能因为平台 API 变动整体不可用），但留 error 供诊断', async () => {
+  const connection = { requestRejection: () => { throw new Error('boom'); } };
+  const agents = { list: () => [{ id: 'a1', status: 'running', inbox: { nextTurn: [], nextStep: [] } }] };
+  const jobs = { list: () => [] };
+  const { ctx, route } = desktopCtx({ agents, jobs, connection });
+  plugin.apply(ctx, {});
+  const res = await call(route('POST', `${BASE}/restart`), makeReq({ method: 'POST' }));
+  assert.equal(res.statusCode, 409, '异常须按放行处理（走到 busy）');
+
+  const env = await call(route('GET', `${BASE}/environment`), makeReq({ url: `${BASE}/environment` }));
+  assert.equal(env.json().platformAuth.verdict, 'error');
+  assert.equal(env.json().platformAuth.error, 'boom', '探测口是唯一能看见平台异常的地方');
+});
+
+test('U20q 探测口永不拦截：401 时仍 200 并回报 unauthorized（否则用户无从得知按钮为何失效）', async () => {
+  const connection = { requestRejection: () => 401 };
+  const { ctx, route } = desktopCtx({ connection });
+  plugin.apply(ctx, {});
+  const res = await call(route('GET', `${BASE}/environment`), makeReq({ url: `${BASE}/environment` }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json().platformAuth,
+    { enforced: true, available: true, verdict: 'unauthorized', error: '' });
 });
 
 test('U20l 插件卸载时等待定时器一并停掉（否则下线后还会按计划重启）', async () => {

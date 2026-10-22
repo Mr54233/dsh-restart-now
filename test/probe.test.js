@@ -42,7 +42,7 @@ test('U15a: 探测口回传 environment + 生效配置（patch 值可见）+ der
   const handler = host.routes.get('/plugins/dsh-restart-now/environment');
   assert.ok(handler, '探测路由已注册');
   const res = fakeRes();
-  handler({ method: 'GET' }, res);
+  await handler({ method: 'GET' }, res);
   assert.equal(res.statusCode, 200);
   const body = JSON.parse(res.body);
   assert.equal(body.ok, true);
@@ -53,6 +53,11 @@ test('U15a: 探测口回传 environment + 生效配置（patch 值可见）+ der
   assert.ok(!('delayMs' in body.config), 'v1.1 删掉 delayMs（用户：不给反悔机会，尽可能快）');
   assert.ok('exePath' in body.config);
   assert.ok('hideSidebarButton' in body.config);
+  assert.equal(body.config.platformAuth, true, 'v1.2.1 平台鉴权默认强制');
+  assert.equal(body.platformAuth.enforced, true, '探测口须回报鉴权是否强制');
+  assert.equal(body.platformAuth.available, false, '无 connection 服务 → 不可用（按放行处理）');
+  assert.equal(body.platformAuth.verdict, 'bypassed');
+  assert.equal(typeof body.configFile, 'string', 'v1.2.1 回报配置文件名（逃生门要手改它）');
   assert.equal(typeof body.derivedExe, 'string');
   assert.ok(body.derivedExe.length > 0, 'derivedExe 非空（resolveExe 总有输出）');
   // v1.1 新增：版本判定 + 上次重启回执 + 等待模式快照

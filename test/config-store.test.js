@@ -15,9 +15,9 @@ let dir = '';
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'dsh-restart-now-u12-')); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-test('U12a DEFAULTS 冻结且四键正确（v1.1 删 delayMs）', () => {
+test('U12a DEFAULTS 冻结且五键正确（v1.1 删 delayMs；v1.2.1 加 platformAuth）', () => {
   assert.deepEqual({ ...DEFAULTS }, {
-    allowRestart: true, confirm: true, exePath: '', hideSidebarButton: false,
+    allowRestart: true, confirm: true, exePath: '', hideSidebarButton: false, platformAuth: true,
   });
   assert.throws(() => { 'use strict'; DEFAULTS.allowRestart = false; }, TypeError);
 });
@@ -47,6 +47,8 @@ test('U12c clampConfig 只收合法键并收紧类型', () => {
   assert.deepEqual(clampConfig({ allowRestart: false, confirm: true, delayMs: 123.7, exePath: '  x.exe  ' }),
     { allowRestart: false, confirm: true, exePath: 'x.exe' }, 'v1.1 起 delayMs 属未知键，被丢弃');
   assert.deepEqual(clampConfig({ hideSidebarButton: true }), { hideSidebarButton: true }, 'v0.12 第 5 键');
+  assert.deepEqual(clampConfig({ platformAuth: false }), { platformAuth: false }, 'v1.2.1 逃生门键');
+  assert.deepEqual(clampConfig({ platformAuth: 'no' }), {}, '非布尔值的逃生门丢弃（默认保持强制）');
   assert.deepEqual(clampConfig({ delayMs: 999999 }), {}, 'delayMs 已是未知键');
   assert.deepEqual(clampConfig({ evil: 1, delayMs: '100', hideSidebarButton: 'yes' }), {}, '未知键与非布尔值丢弃');
   assert.deepEqual(clampConfig(null), {});
@@ -80,10 +82,11 @@ test('U12f effectiveConfig 三层合并：默认 < patch < 文件', () => {
     confirm: false,             // 文件层压过默认
     exePath: 'patch.exe',       // patch 层
     hideSidebarButton: true,    // 文件层压过默认
+    platformAuth: true,         // v1.2.1 默认强制
   });
-  // 无文件时 patch 直接生效（v1.1：四键，无 delayMs）
+  // 无文件时 patch 直接生效（v1.2.1：五键，无 delayMs）
   assert.deepEqual(effectiveConfig({ confirm: false }, join(dir, 'none.json')),
-    { allowRestart: true, confirm: false, exePath: '', hideSidebarButton: false });
+    { allowRestart: true, confirm: false, exePath: '', hideSidebarButton: false, platformAuth: true });
 });
 
 // —— U13 系列（v0.17）：isUsableExePath —— exePath 双闸的判据 ——

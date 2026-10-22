@@ -127,7 +127,7 @@ const DESKTOP_PROBE = {
   ok: true,
   environment: 'desktop',
   platform: 'win32',
-  config: { allowRestart: true, confirm: true, exePath: '', hideSidebarButton: false },
+  config: { allowRestart: true, confirm: true, exePath: '', hideSidebarButton: false, platformAuth: true },
   derivedExe: 'D:\\dsh\\DeepSeek Harness.exe',
   version: '0.2.1-rc.2',
   supportedRange: '>=0.2.0-0',
@@ -271,13 +271,26 @@ test('U21c5 旧配置键 hideSidebarButton 仍能硬关底部按钮（默认值�
   const { captured, injected, ctx } = load({
     probeBody: {
       ...DESKTOP_PROBE,
-      config: { allowRestart: true, confirm: true, exePath: '', hideSidebarButton: true },
+      config: { allowRestart: true, confirm: true, exePath: '', hideSidebarButton: true, platformAuth: true },
     },
   });
   captured.exports.apply(ctx, {});
   await flush();
   assert.ok(!injected.map((i) => i.slotName).includes('sidebar.footer.action'),
     'hideSidebarButton:true 时底部按钮不应注册（向后兼容 v1.1 的配置）');
+});
+
+test('U21c6 v1.2.1 平台鉴权：请求必须带 cookie，且配置页有逃生门开关', () => {
+  // credentials:'omit' 会让壳层鉴权拿不到 cookie → 界面上每个操作都 401。
+  // 这条断言是「鉴权上线后界面仍能用」的唯一保护。
+  assert.ok(!/credentials:\s*'omit'/.test(source),
+    '不得省略凭据：启用平台鉴权后界面操作会全部 401');
+  assert.match(source, /credentials:\s*'same-origin'/, '同源请求须携带平台会话 cookie');
+  assert.ok(source.includes("key: 'platformAuth'"), '配置页须有平台鉴权开关（逃生门）');
+  assert.ok(source.includes('platformAuth: s.cfg.platformAuth !== false'), '保存时须写回平台鉴权键');
+  assert.ok(source.includes('platformAuth: base.platformAuth !== false'),
+    '底部按钮同步时也须保留平台鉴权键（否则写丢后自动关闭鉴权）');
+  assert.ok(source.includes('res.status === 401'), '界面须单独识别 401（与 403 文案分开）');
 });
 
 test('U21d 中英字典键集合一致（漏翻会退化成中文/键名，用户能看出来）', () => {
@@ -430,7 +443,7 @@ test('U21j 会话标题栏按钮：渲染出图标 + 本地化文字，宽窄无
 
 test('U21k 设置→通用 行：左文右钮，点击即重启（不经确认框时直接 POST）', async () => {
   const { captured, injected, ctx, fetchCalls } = load({
-    probeBody: { ...DESKTOP_PROBE, config: { allowRestart: true, confirm: false, exePath: '', hideSidebarButton: false } },
+    probeBody: { ...DESKTOP_PROBE, config: { allowRestart: true, confirm: false, exePath: '', hideSidebarButton: false, platformAuth: true } },
     lang: 'zh-CN',
   });
   captured.exports.apply(ctx, {});
