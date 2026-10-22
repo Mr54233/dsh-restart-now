@@ -380,6 +380,40 @@ test('U20p 平台抛异常 → 不拦截（插件不能因为平台 API 变动�
   assert.equal(env.json().platformAuth.error, 'boom', '探测口是唯一能看见平台异常的地方');
 });
 
+test('U20r 冷却（第 22 项）：窗口内连点一律 409 cooldown，绝不再派一次', async () => {
+  plugin.resetCooldown();
+  const dir = mkdtempSync(join(tmpdir(), 'dsrn-cooldown-'));
+  try {
+    const { ctx, route } = makeCtx({ profileContext: { name: 'desktop', dir } });
+    // 故意给不存在的 exe：冷却放行后必须停在 exe-not-found —— 测试里绝不允许真派发
+    plugin.apply(ctx, { exePath: join(dir, 'nope.exe') });
+    const restart = route('POST', `${BASE}/restart`);
+
+    // 回执照写：模拟「刚刚开始过一次重启」（跨实例有效，换宿主也看得见）
+    writeFileSync(join(dir, 'restart-now.last.json'),
+      JSON.stringify({ at: new Date().toISOString(), atMs: Date.now() }));
+    const blocked = await call(restart, makeReq({ method: 'POST' }));
+    assert.equal(blocked.statusCode, 409, '窗口内必须拒');
+    assert.equal(blocked.json().reason, 'cooldown');
+    assert.ok(blocked.json().retryAfterMs > 0 && blocked.json().retryAfterMs <= 5000, '须告诉用户还要等多久');
+
+    // 回执时间退到窗口外 → 放行（停在 exe-not-found，仍然没有真派发）
+    writeFileSync(join(dir, 'restart-now.last.json'),
+      JSON.stringify({ at: new Date().toISOString(), atMs: Date.now() - 60000 }));
+    const allowed = await call(restart, makeReq({ method: 'POST' }));
+    assert.equal(allowed.statusCode, 500);
+    assert.equal(allowed.json().reason, 'exe-not-found', '冷却放行后才会走到 exe 检查');
+
+    // 失败不占窗口：exe 不可用属前置失败，用户改完配置应当能立刻重试
+    const again = await call(restart, makeReq({ method: 'POST' }));
+    assert.equal(again.statusCode, 500, '前置失败不得把自己锁进冷却');
+    assert.equal(again.json().reason, 'exe-not-found');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    plugin.resetCooldown();
+  }
+});
+
 test('U20q 探测口永不拦截：401 时仍 200 并回报 unauthorized（否则用户无从得知按钮为何失效）', async () => {
   const connection = { requestRejection: () => 401 };
   const { ctx, route } = desktopCtx({ connection });
