@@ -7,6 +7,8 @@
 DSH 桌面版一键重启插件。装/更插件、卡住、需要重开时，点一下就完成「关闭 → 自动拉起」，
 不用自己关窗口再找快捷方式。
 
+![设置 → 重启应用](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/screenshot-1-settings.png)
+
 ## 安装
 
 ```powershell
@@ -26,6 +28,10 @@ dsh plugin --profile desktop add dsh-restart-now
 | 会话标题栏按钮 | 对话标题栏的操作区 |
 | 设置行 | 设置 → 通用 → 重启应用 |
 | 斜杠命令 | `/restart`（支持 `--force` / `--wait`） |
+
+![侧栏面板入口](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/screenshot-2-panel.png)
+
+![另外两个轻量入口](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/screenshot-3-entries.png)
 
 四个界面入口都能在 **设置 → 重启应用** 里单独关掉（关掉即从界面撤除）；
 斜杠命令始终可用。设置页同时显示运行版本自检和上次重启结果（成功停机时长或失败原因）。
