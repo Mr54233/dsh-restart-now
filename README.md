@@ -2,207 +2,71 @@
 
 [![npm](https://img.shields.io/npm/v/dsh-restart-now?label=npm&color=cb3837)](https://www.npmjs.com/package/dsh-restart-now)
 [![license](https://img.shields.io/npm/l/dsh-restart-now)](https://www.npmjs.com/package/dsh-restart-now)
-[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20DSH%20Desktop-0078d4)](#要求)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20DSH%20Desktop-0078d4)](#适用范围)
 
-DSH 桌面版一键重启插件（v1.2.1）：**五个入口**——侧边栏面板、侧边栏底部图标、会话标题栏按钮、设置 → 通用 里的一行、斜杠命令 `/restart`。
-其中四个界面入口都能在设置 → 重启应用 里**单独开关**（关掉即从界面上撤除，不是仅仅隐藏）；斜杠命令没有界面可关，始终可用。
-点一下（或敲一条命令）后，插件先确认自己真的能把助手拉起来（ACK 握手），再**只关掉主进程**让宿主自己优雅退出，
-最后把 `DeepSeek Harness.exe` 重新拉起来；重启结果会写成回执，下次打开设置页就能看到「上次重启成没成」。
-
-## 功能特性
-
-- **五个入口，同一套逻辑**：侧边栏面板（点左上角那一项切到主区的重启面板页）、侧边栏底部图标、会话标题栏按钮、
-  设置 → 通用 里的一行、斜杠命令 `/restart`（另有 `--force` / `--wait`）。
-- **每个入口可单独开关**（v1.2）：设置 → 重启应用 里有 4 个开关（面板 / 底部按钮 / 标题栏 / 设置行），关掉即**撤销槽位注册**；
-  斜杠命令不参与开关。开关状态存**配置文件**（与其它键同层，强杀不丢），`localStorage` 只是首帧缓存。
-- **不会误杀**：派发后先等助手回 ACK；**拿不到 ACK 就报错返回，绝不杀任何进程**（`500 helper-not-responding`）。
-- **只关主进程**：助手执行 `taskkill /PID <主进程> /F`，**不带 `/T`**——宿主因 IPC 断开自己优雅退出、会话日志照常落盘。
-- **不依赖系统 Node**：用应用自身 exe 当 node（`ELECTRON_RUN_AS_NODE=1`），不碰系统 PATH，也不用安装目录里的 runtime。
-- **任务守卫**：有活跃任务时不硬重启——返回 409，弹窗三选一：取消 / 等空闲后重启 / 仍然重启（`?wait=1` / `?force=1`）。
-  插件管理器正在装插件时硬拦（409 `installing`）。
-- **连点不会派发两次**（v1.2.1）：距上次重启开始不足 5 秒时返回 409 `cooldown` 并提示还要等几秒。
-  那一两秒里主进程常常还活着，连点会派发两个助手（各自杀一次、各自拉起一次），可能留下两个实例或互杀；
-  判据同时看内存时间戳与上次回执里的 `atMs`，所以**重启后换了新宿主也认得**。冷却只挡「窗口内的下一次」，
-  前置失败（比如 exe 找不到）不占窗口。
-- **重启回执**：成功写「已完成，停机约 N 秒」，失败写原因；设置页与探测口都能读到。
-- **版本自检**：设置页显示「DSH `<version>` · `<range>`」，不满足 `>=0.2.0` 时红字提示。
-- **中英双语**：界面文案跟随宿主语言（50 个键，中英字典键集合由测试保证一致）；语言取自 DSH 的 locale 服务，
-  在设置里切换语言即时生效。
-
-## 工作原理
-
-### 宿主半边（`lib/index.js`）
-
-注册四条路由（全部 `exact`）＋一条斜杠命令：
-
-| 路由 | 方法 | 用途 |
-| --- | --- | --- |
-| `/plugins/dsh-restart-now/environment` | GET | 探测口：环境（desktop/web）、平台、版本判定（`version` / `supportedRange` / `supported`）、生效配置与推导 exe、**上次重启回执**、等待快照 |
-| `/plugins/dsh-restart-now/restart` | POST | 动作口：`?force=1` 越过任务守卫、`?wait=1` 等空闲后重启、`?cancel=1` 撤销等待 |
-| `/plugins/dsh-restart-now/status` | GET | 等待模式状态：`{state, since, remainingMs, tasks, jobs}` |
-| `/plugins/dsh-restart-now/config` | GET/POST | 配置读写（单注册按 method 分派） |
-
-**门禁顺序（固定）**：① `allowRestart` 总开关 → ② 环境判定（非 desktop 一律 403，绝不触碰 web 环境的进程）
-→ ③ 平台（非 win32 → 403 `unsupported-platform`）→ ④ Q6 围栏（loopback 直连 + 转发头存在即校验、缺失容忍，
-防浏览器端任意页面打本机端口）→ ⑤ 平台会话鉴权（v1.2.1：无有效会话 `401`，来源不可信 `403`）→ ⑥ 插件安装中硬拦（409 `installing`）
-→ ⑦ 活跃任务（409 `busy` / `?wait=1` / `?force=1`）→ ⑧ 冷却（v1.2.1：距上次派发不足 5 秒 → 409 `cooldown`）→ 派发。
-
-### 重启机制（v1.1 重写）
-
-> v0.7 的 WMI 逃逸树、v0.9 的 wscript + VBS 派发已在 v1.1 **整条删除**（`buildVbsDispatch` / `buildDispatcherVbs` /
-> `isStandaloneNode` / `resolveNodeExecutable` 均不再存在）。历史勘误保留在 `docs/02-实施文档.md` §5.0-1。
-
-1. **派发**：宿主把助手脚本写到 `%TEMP%\dsh-restart-now-helper-<stamp>.cjs`，然后用**应用自身 exe 当 node** 拉起：
-   ```js
-   spawn(process.execPath, [helperPath], {
-     detached: true, stdio: 'ignore', windowsHide: true,
-     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-   })
-   ```
-   Electron exe + `ELECTRON_RUN_AS_NODE=1` 就是一个 node（实测 24.21.0），所以**不依赖系统 node / PATH / runtime 目录**。
-2. **ACK 握手**：宿主 `waitForAck(ackPath, 800ms)`（每 50ms 轮询）。**ACK 没出现就返回 500 `helper-not-responding`，一个进程都不杀**
-   ——点了没反应也不会误杀。
-3. **只杀主进程**：`taskkill /PID <主进程> /F`，**绝不带 `/T`**。不带 `/T`，宿主才会因为 IPC 断开自己优雅退出、把会话日志落盘；
-   带 `/T` 会把宿主一起强杀，那才是真丢数据。
-4. **等宿主自退**：轮询主进程死亡（30s）→ 等宿主退出（`HOST_GRACE_MS = 15000`）→ 超时才补刀 `taskkill /PID <宿主> /F`。
-5. **重拉**：800ms 缓冲 → 按清单清环境（见 §配置 上面第 5 步的 `RESPAWN_ENV_DROP`）→ detached 拉起 exe，最多 3 次、
-   每次存活验证 2500ms。
-   - **v1.2.1 起复用启动参数**：拉起前先用 WMI 问「GUI 主进程当初是怎么被启动的」，三重校验
-     （第 0 段必须是同一个 exe；出现 `--type=` 或 `--expose-internals` 说明抓到的是子进程/宿主；问不到）
-     任一不成立就退回不带参数启动。**绝不转发自己的 `process.argv`** —— 插件跑在桌面宿主里，
-     那个 argv 是 desktop-host 运行器的参数，转发会拉起没有窗口的进程。
-   - **v1.2.1 起拉起后回探服务**：查新实例的**进程树**里有没有人在 LISTEN（`Get-NetTCPConnection`），
-     因为 web 服务跑在宿主子进程里，不是主进程本身。**只记日志
-     （`web_listen=ok port=…` / `timeout` / `unsupported`），不当成功判据**。
-     为什么不连旧端口：实测每次启动端口都不同（56355 → 57042 → 55843），连旧端口会在**每次成功**之后误报超时；
-     为什么不只看进程存活：进程活着 ≠ 服务起来了（端口冲突、宿主崩掉时窗口都可能还在）。
-6. **留痕**：成功/失败都写回执；`%TEMP%\dsh-restart-now-<stamp>.err.log` 里还有一行
-   `main_stop=…ms host_grace=…ms respawn=…ms total=…ms` 的计时。
-7. **全失败了要说话**（v1.2.1）：三次都没起来时，助手自己弹一个系统消息框「重启失败：原因 + 请手动打开 + 日志路径」。
-   那一刻窗口已经没了、日志没人看，弹窗是唯一能把话送到眼前的通道（`powershell.exe` 不在就换 `pwsh.exe`，弹不出来只记日志）。
-
-> 刻意不做：端口卡住时「清掉同 exe 的残留进程」。我们已按 pid 精确杀主进程并等宿主优雅退出，
-> 端口不会悬空；替宿主决定杀哪个进程风险大于收益（可能误杀别的安装实例或正在保存的会话）。
-
-### 任务守卫与等待模式
-
-- 有活跃任务（`agent.status === 'running'`、`inbox.nextTurn` / `nextStep` 非空、或 `jobs` 里有 `running` / `stopping`）时，
-  动作口返回 `409 { reason:'busy', tasks, jobs, forceable:true }`，客户端弹**三选一**：取消 / 等空闲后重启 / 仍然重启（默认焦点在后者）。
-- `?wait=1` 进入等待模式：宿主每 5s 复检，空闲即派发，**上限 30 分钟**（到期强制重启）；设置页显示倒计时与「撤销等待」，`?cancel=1` 撤销。
-- `?force=1` 跳过守卫立即重启。
-- 插件安装/卸载中（`<profile>\.plugin-manager\run.json` 的 pid 仍存活）→ `409 installing`，不可 force。
-  `run.json` 解析失败时记日志放行（宁可放行也不让崩溃残锁把按钮永久锁死）。
-
-### 回执与版本
-
-- 回执：`<profile>\restart-now.last.json`。派发前写 begin（stamp / hostPid / mainPid），成功后写
-  `respawnedAt` / `newPid` / `downtimeMs`，失败写 `failed{reason}`。设置页显示「上次重启：已完成，停机约 N 秒 /
-  已发起但未确认成功 / 失败：原因」。
-- 版本：`SUPPORTED_RANGE = '>=0.2.0-0'`（与 `package.json` 的 `engines.dsh` 强同步，单测强制），
-  运行时从 `<resources>\app.asar\package.json` 读版本，回退 `<resources>\app\package.json`。
-  设置页显示「DSH 0.2.1-rc.2 · >=0.2.0」，超出范围时红字。
-
-### 客户端半边（`lib/client.js`）
-
-启动时探测环境，**仅 desktop 且平台为 win32** 才挂载入口；web 环境零挂载。v1.2 起注册 **6 个槽位条目**——五个入口里的四个界面入口（其中侧栏面板是 `panellist` + `main` 两个槽位）+ 一个恒注册的设置页区块：
-
-| 槽位 | order | 作用 |
-| --- | --- | --- |
-| `sidebar.panellist` + `main` | 60 / — | 侧栏面板项 + 它切过去的主区面板页，**必须成对注册**（`selectPanel(key)` 找不到 key 会抛错）；面板项组件只画图标，整行由侧栏渲染 |
-| `sidebar.footer.action` | 100 | 侧边栏底部动作按钮（v1.1 起就有） |
-| `conversation.session.header.actions` | 15 | 会话标题栏按钮；**order 15 故意排在官方 ui-jobs（20）之前**，否则动作组会被挤到右侧 |
-| `settings.general.item` | 91 | 设置 → 通用 里的「左文案 + 右按钮」一行 |
-| `settings.section` | 900 | 插件自己的配置页（**不算入口，恒定注册**——否则用户把入口全关了就再也回不来） |
-
-入口开关落配置文件（四个独立布尔 `entryPanel` / `entryFooter` / `entryHeader` / `entrySettingsRow`），
-关掉一个即调用 disposer **撤销该槽位注册**，不做「注册后隐藏」；插件卸载时全部经 `ctx.effect` 回收。
-`localStorage`（`dsh-restart-now:entries`）只当**首帧缓存**：配置层到达前的头几十毫秒不至于闪一下又消失。
-
-文案中英双语（`STRINGS.zh` / `STRINGS.en`，50 键，键集合一致由单测强制）。**语言以 DSH 的 locale 服务为准**
-（`locale.getSnapshot().active` → `<html lang>` → `navigator.languages` → `en`；服务异步就绪，故另有
-`<html lang>` 属性观察兜底）：在 设置 → 通用 里切换语言，各入口即时跟随。槽位 `label` 是函数 `navLabel()`；
-导航图标认领同时匹配中英两种标签。面板页主按钮优先用官方 `@deepseek-ai/dsh-client-ui-primitives` 的 `Button`
-（`try { require(...) }` 包住，取不到就退回自绘 `.dsrn-button`）。
-
-### 斜杠命令
-
-```
-/restart              # 直接重启（有任务时弹 409 的三选一由客户端处理）
-/restart --force      # 有任务也立刻重启
-/restart --wait       # 等任务结束再重启（最多 30 分钟）
-```
-
-回执中英并列（宿主管不到前端语言），例如「正在重启桌面应用… / Restarting the desktop app…」。
-
-## 配置
-
-设置页「重启应用」区块可直接编辑并保存（落 `restart-now.config.json`）；
-也可在 profile 的 `cordis.patch.yml` 条目 `config` 块中设置。
-优先级：代码默认 < patch 条目 < 配置文件（UI 保存写入文件层）。
-
-| 键 | 默认 | 说明 |
-| --- | --- | --- |
-| `allowRestart` | `true` | 总开关，false 时动作口返回 403 disabled |
-| `confirm` | `true` | 点击后二次确认 |
-| `entryPanel` | `true` | **v1.2.2**：左上角面板入口（侧栏「扩展」列表里的一项 + 它切过去的面板页） |
-| `entryFooter` | `true` | **v1.2.2**：侧栏底部按钮（取代已废弃的 `hideSidebarButton`） |
-| `entryHeader` | `true` | **v1.2.2**：会话标题栏按钮 |
-| `entrySettingsRow` | `true` | **v1.2.2**：设置 → 通用 里的一行 |
-| `platformAuth` | `true` | **v1.2.1**：只允许本应用界面操作重启，本机其它程序直接调用接口会被拒（401/403）。界面自身失效时可置 `false` 自救 |
-| `exePath` | `''` | exe 绝对路径；留空时从当前安装位置自动推导 |
-
-**v1.2.1 起 5 键**：新增 `platformAuth`（默认 `true`）。此前动作口只有「围栏」检查（来源必须是本机回环），
-本机任意进程都能 `curl` 一下把应用重启掉；现在动作口、配置口、状态口都会先向宿主平台要一次会话判定，
-未带有效会话凭据直接 `401`，来源不可信 `403`。判定不可用（旧版宿主无此 API）或平台调用异常时一律**放行**，
-不会把插件变成砖。诊断结论在探测口 `/environment` 的 `platformAuth` 字段里，`verdict` 取值
-`ok`/`unauthorized`/`forbidden`/`rejected`/`skipped`/`bypassed`/`error`。
-
-**重启环境清理（v1.2.1）**：拉起新进程前会删掉 `ELECTRON_RUN_AS_NODE`、`DSH_SESSION_ID`、`DSH_WEB_URL`、`DSH_SHELL`
-——这些描述的是「上一次运行/会话」的事实，继承下去会让新实例带着旧端口、旧会话 id 和 shell 标记跑；
-`DSH_HOME`/`DSH_PROFILE`/`DSH_PROFILE_DIR` 属安装身份，一律保留。实际删掉了哪几个会写进日志（`env_dropped=`）。
-
-**v1.1 起删掉了 `delayMs`**：原第 5 键 `delayMs`（应答后到杀树的延时）已删除——用户要求「不给反悔的机会，尽可能快」，
-现在固定为「等助手 ACK（≤800ms）」。旧配置文件里残留的 `delayMs` 会被静默忽略，不影响启动。
-
-**v1.2.2 起 8 键（issue #1 修复）**：入口开关从本机偏好改成**配置文件**键
-（`entryPanel` / `entryFooter` / `entryHeader` / `entrySettingsRow`，四个独立布尔，默认全 `true`）。
-原因是旧实现只写 `localStorage`：重启是**强杀**（`taskkill /PID /F`，不带 `/T`），
-Chromium 的 localStorage 是异步攒批落盘的，点完开关立刻重启就会丢掉那次写入 → 关掉的入口回弹
-（[issue #1](https://github.com/Mr54233/dsh-restart-now/issues/1)）。
-
-现在拨动开关会**全量 8 键**写回 `/config`（宿主即时落盘，强杀不丢）；
-写回失败时设置页**显红字**（不再静默），并在下次打开设置页时自动重试一次。
-老配置（还没有任何 `entry` 键）会做**一次性迁移**：把 `localStorage` 里的旧值整体写进配置层，
-判据是「配置层没有 entry 键」，迁移过后永不再跑。旧键 `hideSidebarButton` 只保留**读时映射**
-（`true` → `entryFooter: false`），不再写回磁盘。
+DSH 桌面版一键重启插件。装/更插件、卡住、需要重开时，点一下就完成「关闭 → 自动拉起」，
+不用自己关窗口再找快捷方式。
 
 ## 安装
-
-在 DSH 桌面版所在机器上运行：
 
 ```powershell
 dsh plugin --profile desktop add dsh-restart-now
 ```
 
-DSH CLI 会通过 pnpm 从 npm 安装插件，并将其登记到桌面 profile；不需要下载或解压项目源码。安装完成后重启 DSH。升级时再次运行该命令。
+安装后重启 DSH 生效。升级时再次运行该命令。
+
+## 入口
+
+同一个动作，五个入口：
+
+| 入口 | 位置 |
+| --- | --- |
+| 侧栏面板 | 侧边栏「扩展」列表 → 重启应用 |
+| 侧栏底部按钮 | 侧边栏最下方的 ⟳ |
+| 会话标题栏按钮 | 对话标题栏的操作区 |
+| 设置行 | 设置 → 通用 → 重启应用 |
+| 斜杠命令 | `/restart`（支持 `--force` / `--wait`） |
+
+四个界面入口都能在 **设置 → 重启应用** 里单独关掉（关掉即从界面撤除）；
+斜杠命令始终可用。设置页同时显示运行版本自检和上次重启结果（成功停机时长或失败原因）。
+
+## 它做了什么
+
+1. 点击后如有**正在运行的任务**或**插件正在安装**，会先拦住，让你选：等任务结束再重启 / 仍然重启 / 取消。
+2. 确认后**只结束主进程**——宿主自己优雅退出、会话日志正常落盘，不是杀进程树。
+3. 独立助手等旧实例完全退出后，把 `DeepSeek Harness.exe` 重新拉起来（复用你原来的启动参数）。
+4. 结果写成回执，设置页可见「上次重启：已完成，停机约 N 秒」或失败原因。
+
+安全边界：动作请求仅限本机回环同源，本机其它程序直接调接口会被拒绝（可关）。
+
+## 配置
+
+设置页「重启应用」区块可直接编辑保存（写入 profile 的 `restart-now.config.json`）；
+也可在 profile 的 `cordis.patch.yml` 条目 `config` 块中设置。
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `allowRestart` | `true` | 总开关，false 时动作口返回 403 disabled |
+| `confirm` | `true` | 点击后二次确认 |
+| `entryPanel` | `true` | 侧栏面板入口开关 |
+| `entryFooter` | `true` | 侧栏底部按钮开关（取代旧版 `hideSidebarButton`） |
+| `entryHeader` | `true` | 会话标题栏按钮开关 |
+| `entrySettingsRow` | `true` | 设置 → 通用行的开关 |
+| `platformAuth` | `true` | 仅允许本应用界面操作重启，本机其它程序调接口被拒；界面自身失效时可置 `false` 自救 |
+| `exePath` | `''` | exe 绝对路径；留空时自动从当前安装位置推导 |
 
 ## 适用范围
 
-- **操作系统**：暂时仅支持 Windows 10/11。重启链路（`taskkill`、detached spawn、`DeepSeek Harness.exe` 路径推导）
-  目前全部是 Windows 机制；在其他系统上安装后插件不挂载任何入口，动作口返回 403 `unsupported-platform`。
-  macOS / Linux 支持在计划中。
-- **DSH Desktop**：**0.2.0 及以上（验证于 0.2.1-rc.2）**。设置页会显示实际运行版本与支持范围，超出范围时红字提示；
-  版本声明以包内 `engines.dsh` 为准（DSH 只读这个字段）。注意 `DeepSeek Harness.exe` 文件属性里的 44.0.0 是内嵌
-  Electron 运行时版本，不是产品版本；产品版本以 `dsh --version` / 包 `@deepseek-ai/dsh-desktop` 为准。
-  Web profile / `dsh web` 下插件不生效（不挂载入口，动作口拒绝并提示使用 dshmarket 的宿主重启）。
-- **Node**：插件自身代码不要求系统安装 Node（助手用应用自带 exe 当 runtime）；`npm test` 与 CI 用 Node 22 / 24。
+- **操作系统**：暂时仅支持 Windows 10/11；其它系统上插件不挂载任何入口。
+- **DSH Desktop**：0.2.0 及以上（验证于 0.2.1-rc.2）。设置页显示实际版本，超出范围红字提示。
+  Web profile / `dsh web` 下不生效。
+- 无需系统 Node：助手用应用自带运行时。
 
 ## 开发
 
 ```powershell
-npm test            # node:test；12 个文件 122 个用例，零进程副作用、无需运行中的宿主
+npm test            # node:test；12 个文件 122 个用例，零进程副作用
 npm pack --dry-run  # 校验 tarball 内容（CI 同样会跑）
 ```
 
-CI：`.github/workflows/ci.yml`（`windows-latest` × Node 22/24，跑 `npm test` 与 `npm pack --dry-run`，并断言 tarball 含
-`package.json` / `cordis.patch.yml` / `lib/*.js` / `icon.svg` / `locale/*.json`）。
+架构与实现细节（门禁链、重启机制、客户端槽位、勘误史）见仓库 `docs/` 下的设计文档。
