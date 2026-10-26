@@ -14,7 +14,7 @@ DSH 桌面版一键重启插件（v1.2.1）：**五个入口**——侧边栏面
 - **五个入口，同一套逻辑**：侧边栏面板（点左上角那一项切到主区的重启面板页）、侧边栏底部图标、会话标题栏按钮、
   设置 → 通用 里的一行、斜杠命令 `/restart`（另有 `--force` / `--wait`）。
 - **每个入口可单独开关**（v1.2）：设置 → 重启应用 里有 4 个开关（面板 / 底部按钮 / 标题栏 / 设置行），关掉即**撤销槽位注册**；
-  斜杠命令不参与开关。开关状态是**本机（本浏览器）偏好**，存 `localStorage`，默认值仍读配置文件。
+  斜杠命令不参与开关。开关状态存**配置文件**（与其它键同层，强杀不丢），`localStorage` 只是首帧缓存。
 - **不会误杀**：派发后先等助手回 ACK；**拿不到 ACK 就报错返回，绝不杀任何进程**（`500 helper-not-responding`）。
 - **只关主进程**：助手执行 `taskkill /PID <主进程> /F`，**不带 `/T`**——宿主因 IPC 断开自己优雅退出、会话日志照常落盘。
 - **不依赖系统 Node**：用应用自身 exe 当 node（`ELECTRON_RUN_AS_NODE=1`），不碰系统 PATH，也不用安装目录里的 runtime。
@@ -114,8 +114,9 @@ DSH 桌面版一键重启插件（v1.2.1）：**五个入口**——侧边栏面
 | `settings.general.item` | 91 | 设置 → 通用 里的「左文案 + 右按钮」一行 |
 | `settings.section` | 900 | 插件自己的配置页（**不算入口，恒定注册**——否则用户把入口全关了就再也回不来） |
 
-入口开关存本机 `localStorage` 的 `dsh-restart-now:entries`（`{panel, footer, header, settingsRow}` 四个布尔），
+入口开关落配置文件（四个独立布尔 `entryPanel` / `entryFooter` / `entryHeader` / `entrySettingsRow`），
 关掉一个即调用 disposer **撤销该槽位注册**，不做「注册后隐藏」；插件卸载时全部经 `ctx.effect` 回收。
+`localStorage`（`dsh-restart-now:entries`）只当**首帧缓存**：配置层到达前的头几十毫秒不至于闪一下又消失。
 
 文案中英双语（`STRINGS.zh` / `STRINGS.en`，50 键，键集合一致由单测强制）。**语言以 DSH 的 locale 服务为准**
 （`locale.getSnapshot().active` → `<html lang>` → `navigator.languages` → `en`；服务异步就绪，故另有
@@ -143,7 +144,10 @@ DSH 桌面版一键重启插件（v1.2.1）：**五个入口**——侧边栏面
 | --- | --- | --- |
 | `allowRestart` | `true` | 总开关，false 时动作口返回 403 disabled |
 | `confirm` | `true` | 点击后二次确认 |
-| `hideSidebarButton` | `false` | 底部入口的默认可见性（v1.2 起＝底部开关的**默认值**，开关本身存 localStorage；保存后立即生效） |
+| `entryPanel` | `true` | **v1.2.2**：左上角面板入口（侧栏「扩展」列表里的一项 + 它切过去的面板页） |
+| `entryFooter` | `true` | **v1.2.2**：侧栏底部按钮（取代已废弃的 `hideSidebarButton`） |
+| `entryHeader` | `true` | **v1.2.2**：会话标题栏按钮 |
+| `entrySettingsRow` | `true` | **v1.2.2**：设置 → 通用 里的一行 |
 | `platformAuth` | `true` | **v1.2.1**：只允许本应用界面操作重启，本机其它程序直接调用接口会被拒（401/403）。界面自身失效时可置 `false` 自救 |
 | `exePath` | `''` | exe 绝对路径；留空时从当前安装位置自动推导 |
 
@@ -160,11 +164,17 @@ DSH 桌面版一键重启插件（v1.2.1）：**五个入口**——侧边栏面
 **v1.1 起删掉了 `delayMs`**：原第 5 键 `delayMs`（应答后到杀树的延时）已删除——用户要求「不给反悔的机会，尽可能快」，
 现在固定为「等助手 ACK（≤800ms）」。旧配置文件里残留的 `delayMs` 会被静默忽略，不影响启动。
 
-**入口可见性是本机偏好（v1.2）**：哪个入口显示、哪个不显示，存在**本机浏览器的 `localStorage`**
-（键 `dsh-restart-now:entries`，值为 `{panel, footer, header, settingsRow}` 的布尔对象），不进配置文件、不跨机器同步。
-配置文件的 `hideSidebarButton` 因此退化为**底部入口的默认值**（写 `true` 时首次加载即关闭底部按钮，旧配置照旧生效）；
-其余三个入口默认开启。切换底部开关时会把当前配置整体写回 `/config`（`hideSidebarButton = !enabled`，其余键取上次保存的值），
-让这个默认值在重装或换机后仍然成立；写回失败则静默忽略（本机开关已经生效）。
+**v1.2.2 起 8 键（issue #1 修复）**：入口开关从本机偏好改成**配置文件**键
+（`entryPanel` / `entryFooter` / `entryHeader` / `entrySettingsRow`，四个独立布尔，默认全 `true`）。
+原因是旧实现只写 `localStorage`：重启是**强杀**（`taskkill /PID /F`，不带 `/T`），
+Chromium 的 localStorage 是异步攒批落盘的，点完开关立刻重启就会丢掉那次写入 → 关掉的入口回弹
+（[issue #1](https://github.com/Mr54233/dsh-restart-now/issues/1)）。
+
+现在拨动开关会**全量 8 键**写回 `/config`（宿主即时落盘，强杀不丢）；
+写回失败时设置页**显红字**（不再静默），并在下次打开设置页时自动重试一次。
+老配置（还没有任何 `entry` 键）会做**一次性迁移**：把 `localStorage` 里的旧值整体写进配置层，
+判据是「配置层没有 entry 键」，迁移过后永不再跑。旧键 `hideSidebarButton` 只保留**读时映射**
+（`true` → `entryFooter: false`），不再写回磁盘。
 
 ## 安装
 
@@ -190,7 +200,7 @@ DSH CLI 会通过 pnpm 从 npm 安装插件，并将其登记到桌面 profile�
 ## 开发
 
 ```powershell
-npm test            # node:test；12 个文件 101 个用例，零进程副作用、无需运行中的宿主
+npm test            # node:test；12 个文件 122 个用例，零进程副作用、无需运行中的宿主
 npm pack --dry-run  # 校验 tarball 内容（CI 同样会跑）
 ```
 

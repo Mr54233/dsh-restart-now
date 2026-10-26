@@ -245,8 +245,8 @@ test('U20h 探测口：非 desktop 也回 200 与完整快照（客户端靠它�
   assert.equal(body.platform, process.platform);
   assert.equal(typeof body.config, 'object');
   assert.deepEqual(Object.keys(body.config).sort(),
-    ['allowRestart', 'confirm', 'exePath', 'hideSidebarButton', 'platformAuth'],
-    '配置只剩 5 键（delayMs 已删，v1.2.1 加 platformAuth）');
+    ['allowRestart', 'confirm', 'entryFooter', 'entryHeader', 'entryPanel', 'entrySettingsRow', 'exePath', 'platformAuth'],
+    'v1.2.2：配置层八键（原 hideSidebarButton 废弃、delayMs 早删）');
   assert.equal(body.platformAuth.enforced, true, '探测口须回报鉴权结论');
   assert.equal(body.platformAuth.verdict, 'bypassed', '无 connection 服务时按放行处理');
   assert.ok('lastRestart' in body);

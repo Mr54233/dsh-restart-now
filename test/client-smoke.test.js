@@ -35,15 +35,31 @@ function makeElement(tag) {
 }
 
 /** 把 client.js 装进最小浏览器沙箱，返回捕获到的模块导出与记录对象 */
-function load({ probeBody, lang = 'zh-CN', locale = null, entries = null }) {
+function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null }) {
   const captured = { id: null, exports: null };
   const injected = [];
   const appendedStyles = [];
   const localeInjections = [];
   const effects = [];
   const store = new Map();
+  const configPosts = [];
   if (entries) store.set('dsh-restart-now:entries', JSON.stringify(entries));
   const createElement = (type, props, ...children) => ({ type, props: props || {}, children });
+
+  // —— 迷你 hooks：让 useState/useEffect 真的能跑、能触发重渲染 ——
+  // 只支持「一个组件实例」的场景（本文件每次渲染一个组件），足够覆盖设置页的异步加载路径。
+  const hookState = [];
+  let hookIdx = 0;
+  let pendingEffects = [];
+  const react = {
+    createElement,
+    useState(initial) {
+      const i = hookIdx++;
+      if (!(i in hookState)) hookState[i] = initial;
+      return [hookState[i], (value) => { hookState[i] = typeof value === 'function' ? value(hookState[i]) : value; }];
+    },
+    useEffect(fn) { pendingEffects.push(fn); },
+  };
 
   const document = {
     documentElement: { getAttribute: (name) => (name === 'lang' ? (lang.startsWith('zh') ? 'zh-CN' : 'en') : null) },
@@ -69,6 +85,25 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null }) {
     navigator: { language: lang },
     fetch: (url, init) => {
       fetchCalls.push({ url, init });
+      const method = (init && init.method) || 'GET';
+      // POST /config：v1.2.2 入口开关的落盘通道（configPostFail=true 模拟配置文件只读）
+      if (method === 'POST' && String(url).endsWith('/config')) {
+        configPosts.push({ url, init, body: JSON.parse((init && init.body) || '{}') });
+        if (configPostFail) {
+          return Promise.resolve({
+            ok: false, status: 500,
+            json: () => Promise.resolve({ ok: false, reason: 'config-write-failed' }),
+          });
+        }
+        const posted = JSON.parse((init && init.body) || '{}');
+        return Promise.resolve({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ ok: true, config: { ...DESKTOP_PROBE.config, ...posted } }),
+        });
+      }
+      if (method === 'GET' && String(url).endsWith('/config') && configGetBody) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(configGetBody) });
+      }
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -76,7 +111,7 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null }) {
       });
     },
     window: {
-      // v1.2：入口开关存本机 localStorage
+      // v1.2.2：localStorage 只是首帧缓存（真相在配置文件）
       localStorage: {
         getItem: (key) => (store.has(key) ? store.get(key) : null),
         setItem: (key, value) => { store.set(key, String(value)); },
@@ -87,11 +122,7 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null }) {
           captured.id = descriptor.id;
           captured.exports = descriptor.factory((name) => {
             if (name !== 'react') throw new Error('unexpected require: ' + name);
-            return {
-              createElement,
-              useState: (initial) => [initial, () => {}],
-              useEffect: () => {},
-            };
+            return react;
           });
         },
       },
@@ -104,7 +135,16 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null }) {
     get: (name) => {
       if (name === 'slots') {
         return {
-          inject: (slotName, factory) => { injected.push({ slotName, factory }); },
+          // 真 cordis 里 inject(...) 返回 disposer（客户端用它做「关掉入口就撤注册」，v1.2）；
+          // 桩必须同样返回能撤掉记录的 disposer，否则重复 applyEntries 会累积出重复注册。
+          inject: (slotName, factory) => {
+            const entry = { slotName, factory };
+            injected.push(entry);
+            return () => {
+              const i = injected.indexOf(entry);
+              if (i >= 0) injected.splice(i, 1);
+            };
+          },
           register: (descriptor, render) => ({ ...descriptor, render }),
         };
       }
@@ -120,21 +160,41 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null }) {
     // v1.2：入口注销用 ctx.effect（真 cordis 里插件卸载时会跑 teardown）
     effect: (fn) => { const dispose = fn(); effects.push(dispose); return dispose; },
   };
-  return { captured, injected, appendedStyles, fetchCalls, ctx, createElement, localeInjections, effects, store };
+  // 每次渲染一个组件前把 hook 游标归零（迷你 hooks 是单实例语义）
+  const resetHooks = () => { hookIdx = 0; pendingEffects = []; };
+  const takeEffects = () => { const list = pendingEffects; pendingEffects = []; return list; };
+  return {
+    captured, injected, appendedStyles, fetchCalls, ctx, createElement,
+    localeInjections, effects, store, configPosts, resetHooks, takeEffects, react,
+  };
 }
 
 const DESKTOP_PROBE = {
   ok: true,
   environment: 'desktop',
   platform: 'win32',
-  config: { allowRestart: true, confirm: true, exePath: '', hideSidebarButton: false, platformAuth: true },
+  // v1.2.2：入口开关进了配置层（八键），旧键 hideSidebarButton 已废弃
+  config: {
+    allowRestart: true, confirm: true, exePath: '', platformAuth: true,
+    entryPanel: true, entryFooter: true, entryHeader: true, entrySettingsRow: true,
+  },
   derivedExe: 'D:\\dsh\\DeepSeek Harness.exe',
+  // v1.2.2 勘误：迁移判据来自服务端 entriesDeclared（不能看 config——eff 必然含 DEFAULTS 四键）
+  entriesDeclared: true,
   version: '0.2.1-rc.2',
   supportedRange: '>=0.2.0-0',
   supported: true,
   lastRestart: { status: 'ok', downtimeMs: 9400, newPid: 4242 },
   wait: { state: 'idle' },
 };
+
+/** 配置层还没有任何 entry 键的形态（v1.1 及更早的配置文件）——用于测「缓存兜底 / 一次性迁移」 */
+const NO_ENTRY_CONFIG = { allowRestart: true, confirm: true, exePath: '', platformAuth: true };
+
+/** 老用户的探测口响应：配置文件从没写过 entry 键（服务端 entriesDeclared:false）。
+ *  注意 config 仍然是**生效配置**（宿主合并了 DEFAULTS，四个 entry 键必然为 true）——
+ *  真实形态就是这样，所以客户端不能拿 config 判迁移，只能看 entriesDeclared。 */
+const LEGACY_PROBE = { ...DESKTOP_PROBE, config: DESKTOP_PROBE.config, entriesDeclared: false };
 
 /** 递归收集元素树里的可见文本（我们的 React 桩把 children 存在数组里） */
 function textOf(node, out = []) {
@@ -223,9 +283,9 @@ test('U21c desktop 环境 → 挂载配置页 + 四个入口（panellist/main �
 });
 
 test('U21c2 关掉的入口连注册一起撤掉（不是渲染成空，而是压根不注册）', async () => {
-  // 用户上次在设置页关掉了 底部按钮 与 顶栏按钮 → localStorage 记着
+  // v1.2.2：配置层还没有 entry 键（老配置）→ 首帧缓存里的旧值是唯一已知值
   const { captured, injected, ctx } = load({
-    probeBody: DESKTOP_PROBE,
+    probeBody: LEGACY_PROBE,
     entries: { panel: true, footer: false, header: false, settingsRow: true },
   });
   captured.exports.apply(ctx, {});
@@ -241,7 +301,7 @@ test('U21c2 关掉的入口连注册一起撤掉（不是渲染成空，而是�
 
 test('U21c3 全部入口关掉后仍保留配置页 + 插件卸载时撤销自己注册的入口', async () => {
   const { captured, injected, ctx, effects } = load({
-    probeBody: DESKTOP_PROBE,
+    probeBody: LEGACY_PROBE,
     entries: { panel: false, footer: false, header: false, settingsRow: false },
   });
   captured.exports.apply(ctx, {});
@@ -253,13 +313,14 @@ test('U21c3 全部入口关掉后仍保留配置页 + 插件卸载时撤销自�
 });
 
 test('U21c4 panellist 与 main 必须成对：只开 panel 时两个都在，关 panel 时两个都不在', async () => {
-  const on = load({ probeBody: DESKTOP_PROBE, entries: { panel: true } });
+  const offProbe = LEGACY_PROBE;
+  const on = load({ probeBody: offProbe, entries: { panel: true } });
   on.captured.exports.apply(on.ctx, {});
   await flush();
   const onSlots = on.injected.map((i) => i.slotName);
   assert.ok(onSlots.includes('sidebar.panellist') && onSlots.includes('main'));
 
-  const off = load({ probeBody: DESKTOP_PROBE, entries: { panel: false } });
+  const off = load({ probeBody: offProbe, entries: { panel: false } });
   off.captured.exports.apply(off.ctx, {});
   await flush();
   const offSlots = off.injected.map((i) => i.slotName);
@@ -267,17 +328,15 @@ test('U21c4 panellist 与 main 必须成对：只开 panel 时两个都在，关
   assert.ok(!offSlots.includes('main'), 'panel 关掉后必须同时撤 main，否则 selectPanel 指向空面板');
 });
 
-test('U21c5 旧配置键 hideSidebarButton 仍能硬关底部按钮（默认值来源）', async () => {
+test('U21c5 配置层关掉的入口生效（v1.2.2：开关的真相来源是配置文件）', async () => {
   const { captured, injected, ctx } = load({
-    probeBody: {
-      ...DESKTOP_PROBE,
-      config: { allowRestart: true, confirm: true, exePath: '', hideSidebarButton: true, platformAuth: true },
-    },
+    probeBody: { ...DESKTOP_PROBE, config: { ...DESKTOP_PROBE.config, entryFooter: false } },
   });
   captured.exports.apply(ctx, {});
   await flush();
   assert.ok(!injected.map((i) => i.slotName).includes('sidebar.footer.action'),
-    'hideSidebarButton:true 时底部按钮不应注册（向后兼容 v1.1 的配置）');
+    'entryFooter:false 时底部按钮不应注册');
+  assert.ok(injected.map((i) => i.slotName).includes('settings.section'), '配置页始终在');
 });
 
 test('U21c6 v1.2.1 平台鉴权：请求必须带 cookie，且配置页有逃生门开关', () => {
@@ -289,7 +348,7 @@ test('U21c6 v1.2.1 平台鉴权：请求必须带 cookie，且配置页有逃生
   assert.ok(source.includes("key: 'platformAuth'"), '配置页须有平台鉴权开关（逃生门）');
   assert.ok(source.includes('platformAuth: s.cfg.platformAuth !== false'), '保存时须写回平台鉴权键');
   assert.ok(source.includes('platformAuth: base.platformAuth !== false'),
-    '底部按钮同步时也须保留平台鉴权键（否则写丢后自动关闭鉴权）');
+    '入口开关写回时也须保留平台鉴权键（否则写丢后自动关闭鉴权）');
   assert.ok(source.includes('res.status === 401'), '界面须单独识别 401（与 403 文案分开）');
 });
 
@@ -504,4 +563,79 @@ test('U21m v1.2 入口文案两语言齐备（含面板/标题栏/设置行/入�
     const hits = source.split(key + ':').length - 1;
     assert.ok(hits >= 2, `文案键 ${key} 应同时出现在 zh 与 en 里`);
   }
+});
+
+// —— v1.2.2（issue #1）：入口开关的真相在配置文件，localStorage 只当首帧缓存 ——
+// 真机缺陷：强杀（taskkill /PID /F）让 Chromium 丢掉未提交的 localStorage 写入 →
+// 关掉的入口重启后回弹。修法是把开关写进 profile 配置文件（宿主落盘、强杀不丢），
+// 并对老用户做一次性迁移。下面三条守住「迁移一次」「配置优先」「写失败可见」。
+
+test('U21r 老配置（无 entry 键）+ 缓存有值 → 恰好迁移一次 POST /config', async () => {
+  const { captured, ctx, configPosts } = load({
+    probeBody: LEGACY_PROBE,
+    entries: { panel: true, footer: false, header: false, settingsRow: true },
+  });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  assert.equal(configPosts.length, 1, `迁移应当恰好写回一次，实际 ${configPosts.length} 次`);
+  const sent = configPosts[0].body;
+  assert.equal(sent.entryFooter, false, '缓存里关掉的底部按钮要迁进配置层');
+  assert.equal(sent.entryHeader, false, '缓存里关掉的标题栏按钮要迁进配置层');
+  assert.equal(sent.entryPanel, true);
+  assert.equal(sent.entrySettingsRow, true);
+  // 迁移是「全量 8 键」写回：不能把别的键写丢
+  for (const key of ['allowRestart', 'confirm', 'exePath', 'platformAuth']) {
+    assert.ok(key in sent, `迁移写回漏了 ${key}（全量 8 键才会不丢配置）`);
+  }
+  assert.equal('hideSidebarButton' in sent, false, '废弃键不得再写回磁盘');
+});
+
+test('U21s 配置层已有 entry 键 → 永不迁移，且配置赢过缓存', async () => {
+  const { captured, ctx, injected, configPosts } = load({
+    probeBody: { ...DESKTOP_PROBE, config: { ...DESKTOP_PROBE.config, entryFooter: false } },
+    entries: { panel: true, footer: true, header: true, settingsRow: true },
+  });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  assert.equal(configPosts.length, 0, '配置层已有 entry 键时不该再迁移写回');
+  const slots = injected.map((i) => i.slotName);
+  assert.ok(!slots.includes('sidebar.footer.action'),
+    '配置说 entryFooter:false，缓存里的 true 不得翻盘（配置层是真相来源）');
+});
+
+test('U21t 写回失败 → 设置页显红字提示，且开关仍然即时生效（撤注册不依赖落盘）', async () => {
+  const { captured, ctx, injected, configPosts, resetHooks, takeEffects } = load({
+    probeBody: LEGACY_PROBE,
+    entries: { panel: true, footer: false, header: true, settingsRow: true },
+    configPostFail: true,
+    configGetBody: { ok: true, config: DESKTOP_PROBE.config, derivedExe: DESKTOP_PROBE.derivedExe },
+  });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  // 迁移写回失败（配置文件只读）
+  assert.equal(configPosts.length, 1);
+  // 界面行为不依赖落盘：关掉的入口已经撤注册
+  assert.ok(!injected.map((i) => i.slotName).includes('sidebar.footer.action'),
+    '写失败也不能拦住界面上的即时生效');
+
+  const section = injected.find((i) => i.slotName === 'settings.section');
+  assert.ok(section, '配置页槽位未注册');
+  const descriptor = section.factory();
+
+  // 第一遍渲染：加载态；把 effect 跑起来让 GET /config 落地
+  resetHooks();
+  renderDeep(descriptor.render({}));
+  for (const fn of takeEffects()) fn();
+  await flush();
+  await flush();
+
+  // 第二遍渲染：此时加载完成，且 entryWriteFailed 为真 → 必须出现红字
+  resetHooks();
+  const tree = renderDeep(descriptor.render({}));
+  const text = textOf(tree).join(' ');
+  assert.match(text, /未能保存到配置文件|Could not save to the config file/,
+    `写回失败必须在界面上明示（issue #1 的次生原因就是静默失败）：${text.slice(0, 300)}`);
 });
