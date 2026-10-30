@@ -16,6 +16,7 @@ const source = readFileSync(fileURLToPath(new URL('../lib/client.js', import.met
 const REACT_KEYS = ['createElement', 'useState', 'useEffect'];
 
 function makeElement(tag) {
+  const handlers = {};
   return {
     tagName: String(tag).toUpperCase(),
     style: {},
@@ -23,13 +24,17 @@ function makeElement(tag) {
     children: [],
     attributes: {},
     textContent: '',
-    appendChild(child) { this.children.push(child); return child; },
+    parentNode: null,
+    appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
+    removeChild(child) { const i = this.children.indexOf(child); if (i >= 0) this.children.splice(i, 1); child.parentNode = null; return child; },
     setAttribute(name, value) { this.attributes[name] = value; },
     getAttribute(name) { return this.attributes[name] ?? null; },
     hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); },
     removeAttribute(name) { delete this.attributes[name]; },
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(type, fn) { (handlers[type] ||= []).push(fn); },
+    removeEventListener(type, fn) { const list = handlers[type]; if (list) { const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); } },
+    // 测试用：手动派发事件（真实浏览器里由用户点击/按键触发）。keydown 携带 Escape。
+    __dispatch(type) { for (const fn of [...(handlers[type] || [])]) fn({ key: type === 'keydown' ? 'Escape' : '', stopPropagation() {} }); },
     focus() {},
   };
 }
@@ -70,9 +75,16 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
       element.dataset = {};
       return element;
     },
+    // svgEl 用 createElementNS 建 svg/path；桩给一个与 makeElement 等价的工厂
+    createElementNS: (ns, tag) => makeElement(tag),
     head: { appendChild: (tag) => appendedStyles.push(tag) },
     body: makeElement('body'),
+    // openModal 把 Escape 监听挂在 document 上（capture）；真实浏览器由按键触发。
+    addEventListener: (type, fn) => { (docHandlers[type] ||= []).push(fn); },
+    removeEventListener: (type, fn) => { const list = docHandlers[type]; if (list) { const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); } },
+    activeElement: null,
   };
+  const docHandlers = {};
 
   const fetchCalls = [];
   const sandbox = {
@@ -163,9 +175,14 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
   // 每次渲染一个组件前把 hook 游标归零（迷你 hooks 是单实例语义）
   const resetHooks = () => { hookIdx = 0; pendingEffects = []; };
   const takeEffects = () => { const list = pendingEffects; pendingEffects = []; return list; };
+  // 测试用：在 document 上派发按键（openModal 的 Escape 监听在 document 上，capture）
+  const pressEscape = () => { for (const fn of [...(docHandlers.keydown || [])]) fn({ key: 'Escape', stopPropagation() {} }); };
+  // 当前挂着的模态根节点（openModal appendChild 到 body；关闭后应被移除）
+  const modalRoots = () => document.body.children.filter((n) => String(n.className || '').includes('dsrn-modal-root'));
   return {
     captured, injected, appendedStyles, fetchCalls, ctx, createElement,
     localeInjections, effects, store, configPosts, resetHooks, takeEffects, react,
+    document, pressEscape, modalRoots,
   };
 }
 
@@ -639,3 +656,79 @@ test('U21t 写回失败 → 设置页显红字提示，且开关仍然即时生�
   assert.match(text, /未能保存到配置文件|Could not save to the config file/,
     `写回失败必须在界面上明示（issue #1 的次生原因就是静默失败）：${text.slice(0, 300)}`);
 });
+
+// —— v1.2.3（issue #2）：确认框从 x / 遮罩 / Escape 关闭后必须能再次弹出 ——
+// 真机缺陷：confirmOpen 只在包装的 m.close 里复位，而 x/遮罩/Escape 走 openModal 内部
+// close()，绕过了包装 → confirmOpen 永久 true → 再点「立即重启」既不弹窗也不重启。
+test('U21u 确认框被 x/遮罩/Escape 关闭后，再次点击仍能弹出（issue #2）', async () => {
+  const { captured, injected, ctx, document, pressEscape, modalRoots, fetchCalls } = load({
+    probeBody: DESKTOP_PROBE, // confirm: true（默认）→ 走确认框路径
+    lang: 'zh-CN',
+  });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  const row = injected.find((i) => i.slotName === 'settings.general.item');
+  assert.ok(row, '设置通用行槽位未注册');
+  const button = (function walk(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) { for (const child of node) { const hit = walk(child); if (hit) return hit; } return null; }
+    if (node.type === 'button') return node;
+    if (Array.isArray(node.children)) return walk(node.children);
+    return null;
+  })(renderDeep(row.factory().render({})));
+  assert.ok(button, '行内应有按钮');
+  fetchCalls.length = 0;
+
+  // 第一轮：点「立即重启」→ 弹确认框（不发重启请求）
+  await button.props.onClick();
+  await flush();
+  assert.equal(modalRoots().length, 1, '点击后应弹出确认框');
+  assert.ok(!fetchCalls.some((c) => String(c.url).endsWith('/restart') && c.init && c.init.method === 'POST'),
+    '确认框未点「重启」前不得发出请求');
+
+  // x / 遮罩 / Escape 三条路轮一遍：关掉 → 再点 → 必须再次弹（issue #2 的失效路径）
+  const closePaths = [
+    { label: 'x', act: () => findCloseButton(modalRoots()[0]).__dispatch('click') },
+    { label: 'mask', act: () => findMask(modalRoots()[0]).__dispatch('click') },
+    { label: 'Escape', act: () => pressEscape() },
+  ];
+  for (const path of closePaths) {
+    await button.props.onClick();
+    await flush();
+    assert.equal(modalRoots().length, 1, `(${path.label}) 关闭前应有一个确认框`);
+    path.act();
+    assert.equal(modalRoots().length, 0, `(${path.label}) 关闭后确认框应移除`);
+    // 关掉之后 confirmOpen 必须已复位：再点能重新弹（旧实现在这里永久失效）
+    await button.props.onClick();
+    await flush();
+    assert.equal(modalRoots().length, 1, `(${path.label}) 关闭后再次点击必须能再弹确认框`);
+    // 收尾：用 Escape 关掉，进入下一轮
+    pressEscape();
+    assert.equal(modalRoots().length, 0, `(${path.label}) 收尾关闭失败`);
+  }
+
+  // U21k 已覆盖「点确认」→ POST；本用例只验证 issue #2 的三条关闭路径，
+  // 避免把异步重启请求混进确认框状态机。上面的断言已证明每次关闭后 confirmOpen 都复位。
+
+  function findCloseButton(root) {
+    return (function walk(n) {
+      if (!n || typeof n !== 'object') return null;
+      if (Array.isArray(n)) { for (const c of n) { const hit = walk(c); if (hit) return hit; } return null; }
+      if (n.tagName === 'BUTTON' && String(n.className || '').includes('dsrn-modal-close')) return n;
+      return walk(n.children);
+    })(root);
+  }
+  function findMask(root) {
+    return root.children.find((c) => String(c.className || '').includes('dsrn-modal-mask'));
+  }
+  function findConfirmButton(root) {
+    return (function walk(n) {
+      if (!n || typeof n !== 'object') return null;
+      if (Array.isArray(n)) { for (const c of n) { const hit = walk(c); if (hit) return hit; } return null; }
+      if (n.tagName === 'BUTTON' && String(n.className || '').includes('dsrn-confirm-action')) return n;
+      return walk(n.children);
+    })(root);
+  }
+});
+
