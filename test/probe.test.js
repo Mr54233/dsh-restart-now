@@ -47,7 +47,9 @@ test('U15a: 探测口回传 environment + 生效配置（patch 值可见）+ der
   const body = JSON.parse(res.body);
   assert.equal(body.ok, true);
   assert.equal(body.environment, 'web');
-  assert.equal(body.platform, process.platform, 'v1.0.2 起探测口回传平台（客户端据此在非 win32 零挂载）');
+  // v1.2.2：迁移判据（entriesDeclared）由宿主算好回传；非 desktop 分支也必须有该字段，客户端才能一致处理。
+  assert.equal(typeof body.entriesDeclared, 'boolean', '探测口须回报 entriesDeclared（迁移判据）');
+  assert.equal(body.platform, process.platform, 'v1.0.2 起探测口回传平台；v1.3.0 起客户端只放行 win32/darwin');
   assert.equal(body.config.confirm, false, 'patch 层配置进入生效配置');
   assert.equal(typeof body.config.allowRestart, 'boolean');
   assert.ok(!('delayMs' in body.config), 'v1.1 删掉 delayMs（用户：不给反悔机会，尽可能快）');
@@ -59,7 +61,11 @@ test('U15a: 探测口回传 environment + 生效配置（patch 值可见）+ der
   assert.equal(body.platformAuth.enforced, true, '探测口须回报鉴权是否强制');
   assert.equal(body.platformAuth.available, false, '无 connection 服务 → 不可用（按放行处理）');
   assert.equal(body.platformAuth.verdict, 'bypassed');
+  // v1.3.0：configFile 解析链 = profileContext（此处没有）→ DSH_PROFILE_DIR → DSH_HOME
+  // → (USERPROFILE || HOME)/.dsh 兜底。macOS 开发机有 HOME、Windows 有 USERPROFILE，
+  // 所以这里必须是非空字符串（旧实现缺 HOME 兜底时在 macOS 会返回 null，设置页直接 500）。
   assert.equal(typeof body.configFile, 'string', 'v1.2.1 回报配置文件名（逃生门要手改它）');
+  assert.ok(body.configFile.length > 0, 'macOS 的 HOME 兜底须让 configFile 非空');
   assert.equal(typeof body.derivedExe, 'string');
   assert.ok(body.derivedExe.length > 0, 'derivedExe 非空（resolveExe 总有输出）');
   // v1.1 新增：版本判定 + 上次重启回执 + 等待模式快照

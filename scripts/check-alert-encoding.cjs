@@ -1,5 +1,11 @@
 // 只读检查：验证「助手弹窗」那条编码链路（UTF-16LE base64 + -EncodedCommand）能正确往返中文。
 // 与 lib/helper-src.js 里 alertUser 完全相同的编码方式，只把 MessageBox 换成写文件，不打扰用户。
+// 该脚本只验证 Windows PowerShell 编码链路；macOS 上弹窗走 osascript，没有这条链路，直接跳过。
+// 注意：/scripts/ 在 .gitignore 里，是否入库由仓库维护者决定。
+if (process.platform !== 'win32') {
+  console.log('skip: 该检查仅适用于 Windows PowerShell 编码链路（当前平台 ' + process.platform + '）');
+  process.exit(0);
+}
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');

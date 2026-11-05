@@ -64,8 +64,11 @@ test('U18d satisfiesRange：>= / > / <= / < / 精确 / ^ / ~ / 空格 AND / || O
 });
 
 test('U18e detectDshVersion：读 app.asar/package.json，失败回退下一个候选', () => {
+  // 跨平台夹具：候选路径由 path.join 拼出，Windows 是反斜杠、macOS/Linux 是斜杠。
+  // 断言统一成 POSIX 形态再 endsWith，不能写死 'app.asar\\package.json'（Windows 分隔符）。
+  const norm = (file) => String(file).replace(/\\/gu, '/');
   const readFile = (path) => {
-    if (path.endsWith('app.asar\\package.json')) return JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.2' });
+    if (norm(path).endsWith('app.asar/package.json')) return JSON.stringify({ name: '@deepseek-ai/dsh-desktop', version: '0.2.1-rc.2' });
     throw new Error('ENOENT');
   };
   const found = detectDshVersion({ resourcesPath: 'D:\\dsh\\resources', readFile });
@@ -75,7 +78,7 @@ test('U18e detectDshVersion：读 app.asar/package.json，失败回退下一个�
   const fallback = detectDshVersion({
     resourcesPath: 'D:\\dsh\\resources',
     readFile: (path) => {
-      if (path.endsWith('app\\package.json')) return JSON.stringify({ version: '0.3.0' });
+      if (norm(path).endsWith('app/package.json')) return JSON.stringify({ version: '0.3.0' });
       throw new Error('ENOENT');
     },
   });

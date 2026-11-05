@@ -1,4 +1,7 @@
-// test/helper.test.js —— 助手脚本与派发参数（v1.1 全量重写）
+// test/helper.test.js —— 助手脚本与派发参数（v1.1 全量重写；v1.3.0 增加 Windows/macOS 双平台）
+//
+// v1.3.0：Windows 用例全部显式 platform:'win32'（脚本内容不得弱化），另加 U11c/U14 darwin 用例；
+// 真实信号与 spawn 行为由 test/mac-helper.test.js 的 macOS 集成测试覆盖。
 //
 // 机制沿革（每一版都对应一次真机故障，改动须守住这些结论）：
 //   v0.4  node -e 助手 → v0.7 WMI 逃逸树（taskkill /T 连坐杀死 detached 助手）
@@ -12,24 +15,48 @@
 //   U3 可调参数真正写进脚本
 //   U4 失败路径都留痕（日志 / 回执）
 //   U5 派发参数（应用 exe 当 node）
-//   U8 resolveExe、U9 artifactPaths
+//   U8 resolveExe（win32 目录推导 / darwin execPath 本体）、U9 artifactPaths（跨平台构造）
+//   U11/U11c 启动参数复用（win32 分词 / darwin exe 前缀匹配 + POSIX 分词）
+//   U14a–U14d darwin 助手脚本契约与纯函数（信号停机 / ps / lsof / osascript / 转义）
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { basename, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
-  ARTIFACT_RE, artifactPaths, buildHelperScript, buildHelperSpawn, resolveExe, RESPAWN_ENV_DROP,
-  relaunchArgsFrom, tokenizeCommandLine, webListenScript,
+  appleScriptLiteral, ARTIFACT_RE, artifactPaths, buildHelperScript, buildHelperSpawn,
+  collectDescendants, HELPER_PLATFORMS, MAC_TOOLS, MAIN_STOP_GRACE_MS, macAlertScript,
+  macListenArgs, macPsArgs, normalizePath, parseLsofListenPort, parsePsProcessTable,
+  resolveExe, RESPAWN_ENV_DROP, relaunchArgsFrom, tokenizeCommandLine, tokenizePosixCommandLine,
+  webListenScript,
 } from '../lib/helper-src.js';
 
 const EXE = 'D:\\dsh\\DeepSeek Harness.exe';
+/** macOS 真实主进程路径（含空格）：<App>.app/Contents/MacOS/<App>，由 Electron 以 ELECTRON_RUN_AS_NODE 启动。 */
+const MAC_EXE = '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness';
 
 function makeScript(overrides = {}) {
   return buildHelperScript({
+    platform: 'win32', // 显式钉平台：本组用例校验 Windows 助手脚本，与运行测试的宿主平台无关
     exe: EXE,
     mainPid: 1234,
     hostPid: 5678,
     errLog: 'C:\\Temp\\dsh-restart-now-x.err.log',
     ack: 'C:\\Temp\\dsh-restart-now-helper-x.ack',
     receipt: 'C:\\Users\\54\\.dsh\\profiles\\desktop\\restart-now.last.json',
+    ...overrides,
+  });
+}
+
+/** darwin 助手脚本（v1.3.0）：与 Windows 版同一契约，系统原语换成信号 / ps / lsof / osascript。 */
+function makeMacScript(overrides = {}) {
+  return buildHelperScript({
+    platform: 'darwin',
+    exe: MAC_EXE,
+    mainPid: 4242,
+    hostPid: 4343,
+    errLog: '/tmp/dsh-restart-now-x.err.log',
+    ack: '/tmp/dsh-restart-now-helper-x.ack',
+    receipt: '/Users/54/.dsh/profiles/desktop/restart-now.last.json',
     ...overrides,
   });
 }
@@ -138,20 +165,28 @@ test('U5 派发参数：应用自身 exe 当 node（不再依赖系统 Node / WM
   assert.equal(spawnArgs.options.env.PATH, 'x', '继承宿主环境（保留 PATH 等）');
 });
 
-test('U8 resolveExe：配置优先，留空按 execPath 目录推导', () => {
-  assert.equal(resolveExe({ exePath: 'D:\\other\\App.exe' }, 'D:\\dsh\\DeepSeek Harness.exe'), 'D:\\other\\App.exe');
-  assert.equal(resolveExe({ exePath: '   ' }, 'D:\\dsh\\DeepSeek Harness.exe'), 'D:\\dsh\\DeepSeek Harness.exe');
-  assert.equal(resolveExe({}, 'D:\\dsh\\DeepSeek Harness.exe'), 'D:\\dsh\\DeepSeek Harness.exe');
+test('U8 resolveExe：配置优先，留空按平台推导（win32 拼固定文件名；darwin 用 execPath 本体）', () => {
+  // —— Windows：execPath 是 app 目录里的可执行文件，主程序固定叫 DeepSeek Harness.exe ——
+  assert.equal(resolveExe({ exePath: 'D:\\other\\App.exe' }, EXE, 'win32'), 'D:\\other\\App.exe');
+  assert.equal(resolveExe({ exePath: '   ' }, EXE, 'win32'), EXE);
+  assert.equal(resolveExe({}, EXE, 'win32'), EXE);
+  // —— macOS：宿主就是 .app 内的主进程二进制，process.execPath 直接可用；
+  //    旧逻辑拼 .../MacOS/DeepSeek Harness.exe 必然不存在（真机已验证）——
+  assert.equal(resolveExe({}, MAC_EXE, 'darwin'), MAC_EXE);
+  assert.equal(resolveExe({ exePath: '/tmp/other-app' }, MAC_EXE, 'darwin'), '/tmp/other-app');
+  assert.equal(resolveExe({ exePath: '   ' }, MAC_EXE, 'darwin'), MAC_EXE);
 });
 
-test('U9 artifactPaths：helper/ack/errLog 共用同一 stamp（便于成组清理）', () => {
+test('U9 artifactPaths：helper/ack/errLog 共用同一 stamp（便于成组清理）；跨平台构造', () => {
   const stamp = '2026-10-22T08-15-30';
-  const paths = artifactPaths('C:\\Temp', stamp);
-  assert.equal(paths.helper, 'C:\\Temp\\dsh-restart-now-helper-2026-10-22T08-15-30.cjs');
-  assert.equal(paths.ack, 'C:\\Temp\\dsh-restart-now-helper-2026-10-22T08-15-30.ack');
-  assert.equal(paths.errLog, 'C:\\Temp\\dsh-restart-now-2026-10-22T08-15-30.err.log');
+  // 不再写死 Windows 路径：目录用 tmpdir()+join 构造，文件名由平台 path 实现决定
+  const dir = join(tmpdir(), 'dsrn-artifacts');
+  const paths = artifactPaths(dir, stamp);
+  assert.equal(paths.helper, join(dir, 'dsh-restart-now-helper-' + stamp + '.cjs'));
+  assert.equal(paths.ack, join(dir, 'dsh-restart-now-helper-' + stamp + '.ack'));
+  assert.equal(paths.errLog, join(dir, 'dsh-restart-now-' + stamp + '.err.log'));
   for (const file of [paths.helper, paths.ack, paths.errLog]) {
-    const name = file.split('\\').pop();
+    const name = basename(file);
     assert.ok(ARTIFACT_RE.test(name), `prune 正则须能识别 ${name}`);
   }
 });
@@ -184,6 +219,33 @@ test('U11 启动参数复用（v1.2.1）：从主进程命令行里取，三重�
     '--expose-internals 说明抓到的是 desktop-host，转发会拉起无窗口进程 → 放弃');
   assert.equal(relaunchArgsFrom('"D:\dsh\DeepSeek Harness.exe" "a\\"b"', exe), null,
     '带转义引号的命令行不做有损解析 → 放弃');
+});
+
+test('U11c 启动参数复用（darwin）：exe 前缀匹配 + POSIX 分词（路径含空格也不拆错）', () => {
+  // macOS 的 ps -ww 输出是 argv 用空格拼接后的原文（不会重新加引号），而应用 exe 路径本身含空格，
+  // 无法靠分词还原第 0 段 → 先用「已知 exe 字符串前缀」切出参数区，再按 POSIX 规则分词。
+  assert.deepEqual(relaunchArgsFrom(MAC_EXE, MAC_EXE, 'darwin'), [],
+    '命令行就等于 exe → 「确实是这个 exe 且没有参数」，返回空数组而非 null');
+  assert.deepEqual(relaunchArgsFrom(MAC_EXE + ' --no-sandbox --lang=zh-CN', MAC_EXE, 'darwin'),
+    ['--no-sandbox', '--lang=zh-CN'], '同一个 exe 的普通参数原样复用');
+  assert.deepEqual(
+    relaunchArgsFrom(MAC_EXE + " --user-data-dir='/Users/a b/Library' --flag=\"x y\"", MAC_EXE, 'darwin'),
+    ['--user-data-dir=/Users/a b/Library', '--flag=x y'],
+    'POSIX 单/双引号参数须正确分词（引号内空格不拆 token）');
+  assert.equal(relaunchArgsFrom(MAC_EXE + ' --type=renderer', MAC_EXE, 'darwin'), null,
+    '--type= 说明抓到的是 Chromium 子进程 → 放弃');
+  assert.equal(relaunchArgsFrom(MAC_EXE + ' --expose-internals x.js', MAC_EXE, 'darwin'), null,
+    '--expose-internals 说明抓到的是 desktop-host → 放弃');
+  assert.equal(relaunchArgsFrom('/Applications/Other.app/Contents/MacOS/Other --x', MAC_EXE, 'darwin'), null,
+    'exe 不同 → 放弃（同机多份安装时别拉错程序）');
+  assert.equal(relaunchArgsFrom(MAC_EXE + '2 --x', MAC_EXE, 'darwin'), null,
+    '前缀相同但不是同一个 exe（Harness2）→ 放弃，绝不猜');
+  assert.equal(relaunchArgsFrom(null, MAC_EXE, 'darwin'), null, '问不出来 → 放弃');
+  assert.equal(relaunchArgsFrom('   ', MAC_EXE, 'darwin'), null, '空命令行 → 放弃');
+  // 分词函数本体：引号包裹、反斜杠转义、连续空白、空串
+  assert.deepEqual(tokenizePosixCommandLine("a 'b c' \"d e\" f\\ g"), ['a', 'b c', 'd e', 'f g']);
+  assert.deepEqual(tokenizePosixCommandLine('  a   b\tc  '), ['a', 'b', 'c']);
+  assert.deepEqual(tokenizePosixCommandLine(''), []);
 });
 
 test('U11b 助手脚本真的会去问 WMI、并把结果当参数拉起（而不是用空参数）', () => {
@@ -247,4 +309,137 @@ test('U13 web 服务回探（v1.2.1 第 6 项）：查新实例进程树有没�
   const probeIndex = script.indexOf("perf('web_listen=");
   assert.ok(receiptIndex > 0 && probeIndex > receiptIndex, '回执先落，再观测');
   assert.doesNotThrow(() => new Function(script.replace(/^'use strict';/, '')), '注入后仍是合法 JS');
+});
+
+// —— v1.3.0：darwin 助手脚本（真实信号/spawn 行为见 test/mac-helper.test.js 的集成测试）——
+// 本组只钉「生成脚本的契约、注入内容与注入后语法」；Windows 断言（U1/U2/U13…）不得被弱化。
+
+test('U14a darwin 助手脚本：ack 先写、SIGTERM→SIGKILL 停机、绝不用 Windows 原语', () => {
+  const script = makeMacScript();
+  assert.ok(script.startsWith("'use strict';"), '生成脚本是可独立运行的 CJS');
+
+  // 时序：ack 必须先落盘（宿主据此判定派发成功），再探启动参数，最后才杀进程
+  const ackIndex = script.indexOf('fs.writeFileSync(ACK');
+  const probeIndex = script.indexOf('readLaunchArgs();');
+  const termIndex = script.indexOf("signal(MAIN, 'SIGTERM', 'main')");
+  const killIndex = script.indexOf("signal(MAIN, 'SIGKILL', 'main')");
+  assert.ok(ackIndex > 0, 'ack 写入步骤缺失');
+  assert.ok(probeIndex > ackIndex, 'ack 写入必须早于探启动参数');
+  assert.ok(termIndex > probeIndex, '探完启动参数才停主进程');
+  assert.ok(killIndex > termIndex, 'SIGKILL 是 SIGTERM 宽限超时后的升级手段');
+
+  // 停机：只停主进程（绝不按进程树），先 SIGTERM 宽限，再 SIGKILL
+  assert.ok(script.includes('STOP_GRACE_MS'), '宽限窗口须可配（测试/调优）');
+  assert.ok(script.includes('const STOP_GRACE_MS = 10000'), '默认宽限 = MAIN_STOP_GRACE_MS（10s）');
+  assert.ok(script.includes("signal(HOST, 'SIGKILL', 'host')"), '宿主超时须定点补刀');
+  assert.ok(script.includes('waitGone('), '须「等进程消失」而不是固定 sleep');
+  assert.ok(script.includes("error.code === 'EPERM'"), 'EPERM 视为存活');
+  assert.ok(script.includes('invalid main pid: '), 'v1.3.0 pid 健全性：ppid 变 0/1 时绝不 kill');
+  // 绝不允许 Windows 原语混进 darwin 脚本
+  assert.ok(!script.includes('taskkill'), 'darwin 版不得出现 taskkill');
+  assert.ok(!script.toLowerCase().includes('powershell'), 'darwin 版不得出现 PowerShell');
+  assert.ok(!script.includes('Get-CimInstance'), 'darwin 版不得出现 WMI');
+  assert.ok(!script.includes('Get-NetTCPConnection'), 'darwin 监听观测用 lsof，不用 PowerShell');
+});
+
+test('U14b darwin 助手脚本：ps 读启动参数、lsof 观测监听、osascript 弹窗、spawn(EXE,args,...) 拉起', () => {
+  const script = makeMacScript();
+
+  // 启动参数复用：/bin/ps -ww 读主进程命令行 → exe 前缀匹配 + POSIX 分词（三重校验）
+  assert.ok(script.includes('execFileSync(PS, macPsArgs(MAIN)'), '用绝对路径 ps 读主进程启动参数');
+  assert.ok(script.includes("relaunchArgsFrom(rawCommandLine, EXE, 'darwin')"), '须走 darwin 解析规则');
+  assert.ok(script.includes('function tokenizePosixCommandLine('), 'POSIX 分词逻辑须内联（助手不能 import 模块）');
+  assert.ok(script.includes("'launch_args=unavailable'"), '问不到/不敢用须留痕（区分「没参数」与「没问到」）');
+
+  // 监听观测：ps 取进程树 → lsof 查 LISTEN（只进日志，绝不当成功判据）
+  assert.ok(script.includes("execFileSync(PS, ['-axo', 'pid=,ppid=']"), '用 ps 取父子表');
+  assert.ok(script.includes('collectDescendants(parsePsProcessTable(table), mainPid)'), '按新实例进程树收集 pid');
+  assert.ok(script.includes('execFileSync(LSOF, macListenArgs(pids)'), '用 lsof 查这些 pid 的监听');
+  assert.ok(script.includes("'web_listen='"), '观测结论须进日志');
+
+  // 失败弹窗：osascript display alert（应用已死，弹窗是唯一通道）
+  assert.ok(script.includes("spawn(OSASCRIPT, ['-e', macAlertScript(message)]"), '失败用 osascript 弹窗');
+  assert.ok(script.includes('function macAlertScript('), '弹窗脚本生成逻辑须内联');
+  assert.ok(script.includes('await alertUser('), '弹窗须 await（否则进程先退，弹不出来）');
+
+  // 拉起：应用自身二进制当程序 + detached + 干净环境 + 存活验证/重试
+  assert.ok(script.includes("spawn(EXE, args, { detached: true, stdio: 'ignore', cwd: path.dirname(EXE), env })"),
+    '拉起目标是 exe 本体：detached、继承环境（已删 ENV_DROP）、cwd 为 exe 目录');
+  assert.ok(script.includes('for (const key of ENV_DROP)') && script.includes('delete env[key]'),
+    '拉起前按清单删「上一次运行」的 env 事实');
+  assert.ok(script.includes('const ENV_DROP = '), '删除清单须注入脚本');
+  assert.ok(script.includes('ALIVE_MS'), '每次拉起后须做存活验证');
+  assert.ok(script.includes('ATTEMPTS'), '失败须重试');
+
+  // 系统工具必须绝对路径（detached 进程不赌 PATH）
+  for (const tool of [MAC_TOOLS.ps, MAC_TOOLS.lsof, MAC_TOOLS.osascript]) {
+    assert.ok(script.includes(JSON.stringify(tool)), tool + ' 须以绝对路径注入');
+  }
+
+  // 收尾：回执先落盘，再观测监听（观测慢不能拖着回执不写）
+  const receiptIndex = script.indexOf('respawnedAt');
+  const listenIndex = script.indexOf("perf('web_listen=");
+  assert.ok(receiptIndex > 0 && listenIndex > receiptIndex, '回执先落，再观测');
+
+  assert.doesNotThrow(() => new Function(script.replace(/^'use strict';/, '')), '生成的脚本须是合法 JS');
+});
+
+test('U14c darwin 助手脚本：路径转义安全（空格/单引号/双引号 JSON round-trip）+ 参数可调', () => {
+  const raw = "/Applications/it's \"x\"/DeepSeek Harness";
+  const script = makeMacScript({
+    exe: raw,
+    hostGraceMs: 2222,
+    stopGraceMs: 333,
+    attempts: 7,
+    aliveMs: 999,
+    webListenMs: 111,
+    webListenPollMs: 22,
+  });
+  const matched = script.match(/const EXE = ("(?:[^"\\]|\\.)*")/);
+  assert.ok(matched, '脚本须含 EXE 字面量');
+  assert.equal(JSON.parse(matched[1]), raw, 'JSON 解析回来必须等于原路径');
+  assert.ok(script.includes('const HOST_GRACE_MS = 2222'), '宿主优雅关闭窗口可调');
+  assert.ok(script.includes('const STOP_GRACE_MS = 333'), 'macOS 停机宽限可调（默认 10s）');
+  assert.ok(script.includes('const ATTEMPTS = 7'));
+  assert.ok(script.includes('const ALIVE_MS = 999'));
+  assert.ok(script.includes('const WEB_LISTEN_MS = 111'), '监听观测窗口可调（缩短后集成测试才跑得快）');
+  assert.ok(script.includes('const WEB_LISTEN_POLL_MS = 22'));
+  assert.doesNotThrow(() => new Function(script.replace(/^'use strict';/, '')), '注入后仍是合法 JS');
+});
+
+test('U14d darwin 纯函数：AppleScript 转义 / 弹窗 / lsof 端口 / ps 进程树 / 路径归一化', () => {
+  // AppleScript 方言不认 JSON 的 \uXXXX：反斜杠与双引号各自转义，换行写成 \n
+  assert.equal(appleScriptLiteral('a"b\\c\nd'), '"a\\"b\\\\c\\nd"');
+  const alert = macAlertScript('重启失败：x', 'DeepSeek Harness');
+  assert.equal(alert, 'display alert "DeepSeek Harness" message "重启失败：x" as critical');
+  assert.ok(alert.endsWith('as critical'), '弹窗是 critical 级（应用已死，必须让人看见）');
+
+  // lsof 输出 → 第一个 LISTEN 端口；没有监听返回 0
+  assert.equal(parseLsofListenPort('COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\nnode 1 u 20u IPv4 0x1 0t0 TCP 127.0.0.1:50508 (LISTEN)'), 50508);
+  assert.equal(parseLsofListenPort('node 1 u 20u IPv4 0x1 0t0 TCP *:443 (LISTEN)'), 443);
+  assert.equal(parseLsofListenPort('node 1 u 20u IPv6 0x1 0t0 TCP [::1]:3000 (LISTEN)'), 3000);
+  assert.equal(parseLsofListenPort('no listeners here'), 0);
+
+  // ps 进程树 → 父子索引 → 整棵树（含自身，防脏数据成环）
+  const table = parsePsProcessTable('  1     0\n  2     1\n  3     1\n  4     3\n');
+  assert.deepEqual(collectDescendants(table, 1), [1, 2, 3, 4]);
+  assert.deepEqual(collectDescendants(table, 4), [4]);
+  assert.deepEqual(collectDescendants(table, 0), []);
+  assert.deepEqual(collectDescendants(new Map(), 42), [42]);
+
+  // 系统工具参数
+  assert.deepEqual(macPsArgs(42), ['-ww', '-p', '42', '-o', 'command=']);
+  assert.deepEqual(macListenArgs([42, 0, 7]), ['-nP', '-a', '-iTCP', '-sTCP:LISTEN', '-p', '42', '-p', '7']);
+
+  // 路径归一化：win32 统一分隔符 + 忽略大小写；darwin 保留大小写（宁可不带参数也不拉错程序）
+  assert.equal(normalizePath('D:\\dsh\\App.exe/', 'win32'), 'd:\\dsh\\app.exe');
+  assert.equal(normalizePath('D:\\dsh\\App.exe\\', 'win32'), 'd:\\dsh\\app.exe');
+  assert.equal(normalizePath('/Applications/App////', 'darwin'), '/Applications/App');
+  assert.equal(normalizePath('/Applications/App', 'darwin'), '/Applications/App');
+  assert.notEqual(normalizePath('/Applications/App', 'darwin'), '/applications/app');
+
+  // 平台清单与默认常量（与 environment.SUPPORTED_PLATFORMS 同口径）
+  assert.deepEqual([...HELPER_PLATFORMS], ['win32', 'darwin']);
+  assert.equal(MAIN_STOP_GRACE_MS, 10000, 'macOS 停机宽限默认 10s：给 Electron 体面退出的机会');
+  assert.throws(() => buildHelperScript({ platform: 'linux' }), TypeError, '不支持的平台必须显式抛错');
 });

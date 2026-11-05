@@ -5,7 +5,7 @@ DSH 桌面版一键重启插件的需求语境。此上下文只关心一件事�
 ## Language
 
 **重启 (Restart)**:
-应用级重启：DeepSeek Harness 桌面应用整棵进程树退出并重新启动，窗口消失后重现。
+应用级重启：DeepSeek Harness 桌面应用整体退出（只结束 Electron 主进程，宿主因 IPC 断开优雅退出、会话落盘）并重新启动，窗口消失后重现。
 _Avoid_: 重载、刷新、重启宿主（这些是别的动作）
 
 **宿主重启 (Host Reload)**:
@@ -34,9 +34,15 @@ _Avoid_: 可见性（那是 CSS 层面的事）、显示开关（与 `hideSideba
 _Avoid_: 配置源、配置优先级（说「层」更准确）
 
 **强杀 (Hard Kill)**:
-`taskkill /PID <主进程> /F`，不带 `/T`。主进程收不到退出钩子，Chromium 尚未提交的 `localStorage`
-写入会丢——这是 v1.2.1 入口开关回弹的根因。
+不经过主进程退出钩子的停机方式。Windows：`taskkill /PID <主进程> /F`，不带 `/T`；
+macOS：`SIGKILL`（先 `SIGTERM` 宽限 10s，仍未退出才升级）。主进程收不到退出钩子，
+Chromium 尚未提交的 `localStorage` 写入会丢——这是 v1.2.1 入口开关回弹的根因。
 _Avoid_: 杀树（那是 v0.7 之前的做法，已被证明会连坐助手进程）
+
+**信号式重启 (Signal Restart)**:
+macOS 上的停机方式：先对主进程发 `SIGTERM`（宽限 10s），未退出再 `SIGKILL`；宿主随后因 IPC 断开优雅退出。
+它与 Windows 的「只结束主进程」是同一契约下的两种系统原语，不是两套重启流程。
+_Avoid_: macOS 专属重启、kill 进程树
 
 ## Decisions
 
@@ -51,3 +57,22 @@ _Avoid_: 杀树（那是 v0.7 之前的做法，已被证明会连坐助手进�
 它在 v1.2 已退化为「底部入口的默认值」，与 `entryFooter` 管同一件事。决定废弃：读配置时把
 `hideSidebarButton: true` 映射成 `entryFooter: false`（一次性兼容），此后 schema / UI / 文档只出现
 `entryFooter`。
+
+**ADR-003 支持 macOS**（2026-11-05）
+起因：v1.2.3 及之前只支持 Windows（taskkill / WMI / PowerShell 全是 Win32 机制），macOS 用户无法使用。
+决定：
+① 重启契约不变——只结束 Electron 主进程，宿主因 IPC 断开优雅退出（会话落盘），助手等它退出后再拉起；
+   只把系统原语换成 macOS 版本：`SIGTERM`（宽限 10s 未退则 `SIGKILL`）、`ps` 读启动参数、`lsof` 观测监听、
+   `osascript` 弹窗。
+② 配置路径由 profileContext 解析（`<profile>/restart-now.config.json`），DSH_PROFILE_DIR / DSH_HOME /
+   USERPROFILE / HOME 依次兜底；macOS 默认 `~/.dsh/profiles/desktop/restart-now.config.json`，
+   Windows 默认 `%USERPROFILE%\.dsh\profiles\desktop\restart-now.config.json`。
+理由：
+- macOS 没有 taskkill / WMI：`SIGTERM` 是 Electron 主进程的标准退出语义，先 TERM 后 KILL 才能给会话落盘
+  留时间；`kill -9` 起步虽快，但与「优雅退出」契约冲突。
+- macOS 桌面宿主不导出 DSH_* 环境变量（真机只剩 ELECTRON_RUN_AS_NODE 与 DSH_CLIENT_VERSION），旧实现
+  纯环境变量解析会返回 null → `/config` 写入 500、入口开关存不住；profileContext 是官方权威来源，HOME 只作兜底。
+放弃的替代方案：
+- 为 macOS 单写一套重启流程（契约会漂移；除系统原语外，ack / 收据 / 重试 / 观测都可以共用）；
+- 把配置路径硬编码到 `~/.dsh`（忽略自定义 profile，也破坏 Windows 既有行为）。
+适用范围：Windows 10/11 + macOS 12+（Intel / Apple Silicon），DSH Desktop 0.2.0+（真机验证 0.2.1-rc.5）。
