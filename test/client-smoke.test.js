@@ -4,7 +4,7 @@
 // 而它最容易犯的错（顶层语法、STRINGS 键缺失、apply 时机抛异常）会让整个插件包
 // 在 __ModuleLoader__ 里静默失败——界面直接消失，日志里只有一行 loaded without registering。
 // 这里用一个最小 DOM/React 桩把它真正跑起来：捕获 module factory、调用 apply，
-// 断言「web 环境零挂载」「desktop 环境挂两个槽位」「中英文字典键集合一致」。
+// 断言「web / 未知平台零挂载」「win32 / darwin 桌面挂载全部入口」「中英文字典键集合一致」。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -205,6 +205,14 @@ const DESKTOP_PROBE = {
   wait: { state: 'idle' },
 };
 
+/** v1.3.0：macOS 桌面探测响应 = 同一份 DESKTOP_PROBE，只是平台与推导 exe 换成 mac 真实形态
+ *  （<App>.app/Contents/MacOS/<App>，路径含空格）。客户端白名单放宽后必须照常全量挂载。 */
+const DARWIN_PROBE = {
+  ...DESKTOP_PROBE,
+  platform: 'darwin',
+  derivedExe: '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness',
+};
+
 /** 配置层还没有任何 entry 键的形态（v1.1 及更早的配置文件）——用于测「缓存兜底 / 一次性迁移」 */
 const NO_ENTRY_CONFIG = { allowRestart: true, confirm: true, exePath: '', platformAuth: true };
 
@@ -262,6 +270,23 @@ test('U21b web 环境（含平台不符）→ 零挂载，不碰任何槽位', a
     await flush();
     assert.equal(injected.length, 0, `${JSON.stringify(probeBody)} 下不应挂载任何入口`);
   }
+});
+
+// v1.3.0：重启链路已打通 macOS，挂载白名单从「仅 win32」放宽到 win32 + darwin。
+// 探测响应复用 DESKTOP_PROBE，只替换平台与 derivedExe（.app 内 Mach-O 路径，含空格）。
+test('U21b2 darwin 探测响应 → 挂载全部入口（v1.3.0 白名单）', async () => {
+  const { captured, injected, ctx } = load({ probeBody: DARWIN_PROBE });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  assert.deepEqual(injected.map((i) => i.slotName).sort(), [
+    'conversation.session.header.actions',
+    'main',
+    'settings.general.item',
+    'settings.section',
+    'sidebar.footer.action',
+    'sidebar.panellist',
+  ], 'darwin 桌面必须与 win32 一样挂载全部入口（v1.3.0 白名单含 macOS）');
 });
 
 test('U21c desktop 环境 → 挂载配置页 + 四个入口（panellist/main 成对）', async () => {

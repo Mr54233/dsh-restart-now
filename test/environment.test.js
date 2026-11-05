@@ -4,7 +4,7 @@
 // 事实依据：app.asar v44.0.0 全文无 desktopProfiles；dshmarket index.ts:183-204（#702/#729）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectEnvironment, supportedPlatform } from '../lib/environment.js';
+import { detectEnvironment, supportedPlatform, SUPPORTED_PLATFORMS } from '../lib/environment.js';
 
 const OFFICIAL_DESKTOP_ARGV = [
   'D:\\dsh\\DeepSeek Harness.exe',
@@ -86,13 +86,18 @@ test('U7g 异常形状：全 null/非对象 ctx → web；desktopProfiles 为垃
   }
 });
 
-test('U7h supportedPlatform 矩阵：win32 → true；darwin/linux → false（v1.0.2 适用范围）', () => {
+test('U7h supportedPlatform 矩阵：win32 / darwin → true；linux / 空串 → false（v1.3.0 适用范围）', () => {
+  // v1.3.0：重启链路已打通 Windows（taskkill/WMI/PowerShell）与 macOS（信号/ps/lsof/osascript），
+  // 白名单只含这两个平台；linux 等其它平台动作口拒绝、客户端零挂载。
+  assert.deepEqual([...SUPPORTED_PLATFORMS], ['win32', 'darwin'], '白名单内容须锁定（client/helper 同口径）');
+  assert.ok(Object.isFrozen(SUPPORTED_PLATFORMS), '白名单须冻结，防止运行时被改');
   assert.equal(supportedPlatform('win32'), true);
-  assert.equal(supportedPlatform('darwin'), false);
+  assert.equal(supportedPlatform('darwin'), true);
   assert.equal(supportedPlatform('linux'), false);
   assert.equal(supportedPlatform(''), false);
-  // undefined 触发默认参 → process.platform（JS 默认参语义），本机 Windows 即 true
-  assert.equal(supportedPlatform(undefined), process.platform === 'win32');
-  // 本仓库只在 Windows 上开发/测试，宿主真机断言当前平台可用
-  assert.equal(supportedPlatform(), process.platform === 'win32');
+  assert.equal(supportedPlatform('freebsd'), false);
+  // undefined 触发默认参 → process.platform（JS 默认参语义）；本机是 win32 或 darwin 即为 true
+  const hostSupported = process.platform === 'win32' || process.platform === 'darwin';
+  assert.equal(supportedPlatform(undefined), hostSupported);
+  assert.equal(supportedPlatform(), hostSupported);
 });
