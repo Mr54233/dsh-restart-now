@@ -3,14 +3,38 @@
 // 这是唯一覆盖门禁顺序的测试：真机验证代价太高（会真的杀应用），所以把 ctx.get /
 // webServer.register / http 的 req/res 全部假造，只走真实的路由处理函数。
 // 每个用例都断言「没有派发」——只要有一条门禁失守，restart 就会真杀进程，不能只测返回值。
+//
+// 环境隔离（2026-11-12 勘误，v1.3.0 之上仍然需要）：在 DSH 宿主里跑 `npm test` 时进程带着
+// DSH_PROFILE_DIR / DSH_HOME，resolveConfigFile() 会读到真配置文件，文件层把测试 patch 层的
+// allowRestart:false / platformAuth:false 翻回 true，U20b/U20o 随机失败（宿主外跑则全绿）。
+// 光删 DSH_* 不够：resolveConfigFile 的最后一层兜底是 USERPROFILE\.dsh，开发机上同样有真配置。
+// ESM 静态 import 先于一切顶层语句，所以「删 env + 换 USERPROFILE」必须先于动态 import 插件。
+// v1.3.0 的 before/after 沙箱（DSH_PROFILE_DIR → 空临时目录）与本隔离互补：前者护住测试期间，
+// 本段护住模块装载瞬间（lib/index.js 顶层没有配置读取，但插件第一次 apply 前仍有窗口）。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import * as plugin from '../lib/index.js';
-import { SUPPORTED_RANGE } from '../lib/version.js';
+// ---- 环境隔离（先于一切插件 import 执行）------------------------------------
+// 在 DSH 宿主里跑 `npm test` 时进程带着 DSH_PROFILE_DIR / DSH_HOME，resolveConfigFile()
+// 会读到真配置文件，文件层把测试 patch 层的 allowRestart:false / platformAuth:false 翻回
+// true，U20b/U20o 随机失败（宿主外跑则全绿）。光删 DSH_* 不够：resolveConfigFile 的最后
+// 一层兜底是 USERPROFILE\.dsh，开发机上同样有真配置。ESM 静态 import 先于一切顶层语句，
+// 但 node:test 等运行时模块的导入不触发插件代码，所以删 env 放在静态 import 之后、
+// 动态 import 插件之前依然有效（lib/index.js 在被 import 时才读 process.env）。
+const SAVED_ENV = {};
+for (const key of ['DSH_PROFILE_DIR', 'DSH_HOME', 'DSH_PROFILE', 'DSH_SESSION_ID', 'USERPROFILE']) {
+  if (process.env[key] !== undefined) { SAVED_ENV[key] = process.env[key]; delete process.env[key]; }
+}
+const SANDBOX_HOME = mkdtempSync(`${tmpdir().replace(/\\/g, '/')}/dsrn-dispatch-env-`);
+process.env.USERPROFILE = SANDBOX_HOME;
+const plugin = await import('../lib/index.js');
+const { SUPPORTED_RANGE } = await import('../lib/version.js');
+// DSH_PROFILE_DIR 不恢复：v1.3.0 的 before/after 沙箱接管它（测试期间指向空临时目录）。
+// USERPROFILE 同理保持沙箱值直到进程退出——resolveConfigFile 每次调用都重读 process.env。
+process.env.DSH_PROFILE = SAVED_ENV.DSH_PROFILE;
 
 const BASE = '/plugins/dsh-restart-now';
 
