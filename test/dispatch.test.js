@@ -13,7 +13,7 @@
 // 本段护住模块装载瞬间（lib/index.js 顶层没有配置读取，但插件第一次 apply 前仍有窗口）。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -526,6 +526,231 @@ gateTest('U20l 插件卸载时等待定时器一并停掉（否则下线后还�
 
   const after = await call(statusHandler, makeReq({ method: 'GET', url: `${BASE}/status` }));
   assert.equal(after.json().state, 'idle', '卸载后等待状态必须复位');
+});
+
+// ---- v1.3.1 仅关闭（close-only）------------------------------------------------
+// close 与 restart 共用门禁 ①–⑧ 与同一助手派发机制，但不提供 wait/cancel——
+// 等待模式的终局是一次重启，与「仅关闭」语义冲突，刻意不复用（close 绝不导致重启）。
+// CLOSE_HELPER_READY=false（helper-src 尚未实现 action:'close'）时派发层 501 拒绝；
+// helper 实现并翻 true 后，本节用例按该常量的实际取值自动适配，无需改动。
+
+const CLOSE_URL = `${BASE}/close`;
+
+test('U20s1 关闭口：注册为 POST，GET/PUT/DELETE → 405 且 Allow 头正确', async () => {
+  const { ctx, route } = makeCtx({});
+  applyPlugin(ctx);
+  const close = route('POST', CLOSE_URL);
+  for (const method of ['GET', 'PUT', 'DELETE']) {
+    const res = await call(close, makeReq({ method, url: CLOSE_URL }));
+    assert.equal(res.statusCode, 405, `${method} 必须 405`);
+    assert.equal(res.headers.allow, 'POST');
+  }
+});
+
+test('U20s2 关闭口门禁与 restart 同序：总开关在环境判定之前（① 先于 ②）', async () => {
+  const disabled = makeCtx({});
+  applyPlugin(disabled.ctx, { allowRestart: false });
+  const off = await call(disabled.route('POST', CLOSE_URL), makeReq({ method: 'POST', url: CLOSE_URL }));
+  assert.equal(off.statusCode, 403);
+  assert.equal(off.json().reason, 'disabled', 'web 环境下也能测到 ① 总开关（顺序证据）');
+
+  const { ctx, route } = makeCtx({});
+  applyPlugin(ctx);
+  const nonDesktop = await call(route('POST', CLOSE_URL), makeReq({ method: 'POST', url: CLOSE_URL }));
+  assert.equal(nonDesktop.statusCode, 403);
+  assert.deepEqual(nonDesktop.json(), { ok: false, reason: 'non-desktop', hint: 'use dshmarket' });
+});
+
+gateTest('U20s3 关闭口 ⑥ 安装锁：run.json 指向存活 pid → 409 installing，与 restart 同口径', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsrn-dispatch-close-lock-'));
+  try {
+    mkdirSync(join(dir, '.plugin-manager'), { recursive: true });
+    writeFileSync(join(dir, '.plugin-manager', 'run.json'), JSON.stringify({ pid: process.pid }));
+    const { ctx, route } = desktopCtx({ profileContext: { name: 'desktop', dir } });
+    applyPlugin(ctx);
+    const res = await call(route('POST', CLOSE_URL), makeReq({ method: 'POST', url: CLOSE_URL }));
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.json().reason, 'installing');
+    assert.equal(res.json().forceable, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+gateTest('U20s4 关闭口 ⑦ 活跃任务：409 busy 可 force；?wait=1 不复用等待重启；?force=1 才放行', async () => {
+  const agents = { list: () => [{ id: 'a1', status: 'running', inbox: { nextTurn: [], nextStep: [] } }] };
+  const jobs = { list: () => [{ id: 'j1', status: 'running' }] };
+  const { ctx, route } = desktopCtx({ agents, jobs });
+  applyPlugin(ctx);
+  const close = route('POST', CLOSE_URL);
+  const status = route('GET', `${BASE}/status`);
+
+  const busy = await call(close, makeReq({ method: 'POST', url: CLOSE_URL }));
+  assert.equal(busy.statusCode, 409);
+  const payload = busy.json();
+  assert.equal(payload.reason, 'busy');
+  assert.equal(payload.tasks, 1);
+  assert.equal(payload.jobs, 1);
+  assert.equal(payload.forceable, true);
+
+  // close 不复用等待重启：?wait=1 不会进入等待模式（等待的终局是一次 restart）
+  const waitAttempt = await call(close, makeReq({ method: 'POST', url: `${CLOSE_URL}?wait=1` }));
+  assert.equal(waitAttempt.statusCode, 409, 'close 上 wait 无效，busy 照拒');
+  assert.equal(waitAttempt.json().reason, 'busy');
+  const duringWait = await call(status, makeReq({ url: `${BASE}/status` }));
+  assert.equal(duringWait.json().state, 'idle', '绝不能因为 ?wait=1 进入等待模式');
+
+  // ?force=1 越过 busy，放行到派发层：助手未实现 close → 501 close-helper-missing；
+  // 助手实现并翻 CLOSE_HELPER_READY 后应继续走到 exe 前置检查 → 500 exe-not-found（夹具 exePath 不存在）
+  const forced = await call(close, makeReq({ method: 'POST', url: `${CLOSE_URL}?force=1` }));
+  if (plugin.CLOSE_HELPER_READY) {
+    assert.equal(forced.statusCode, 500);
+    assert.equal(forced.json().reason, 'exe-not-found', '放行后应停在 exe-not-found（安全夹具挡住真派发）');
+  } else {
+    assert.equal(forced.statusCode, 501);
+    assert.equal(forced.json().reason, 'close-helper-missing', '助手未实现 action:"close" 前必须拒绝派发（否则就是一次重启）');
+  }
+});
+
+gateTest('U20s5 关闭口 ⑤ 平台鉴权：401 unauthorized，文案与 restart 同一套', async () => {
+  const connection = { requestRejection: async () => 401 };
+  const { ctx, route } = desktopCtx({ connection });
+  applyPlugin(ctx);
+  const res = await call(route('POST', CLOSE_URL), makeReq({ method: 'POST', url: CLOSE_URL }));
+  assert.equal(res.statusCode, 401, '缺凭据是 401，不是 403');
+  assert.equal(res.json().reason, 'unauthorized');
+  assert.ok(res.json().hint.length > 0);
+});
+
+gateTest('U20s6 关闭口 ⑧ 冷却与重启共用同一窗口（回执 atMs 判据）', async () => {
+  plugin.resetCooldown();
+  const dir = mkdtempSync(join(tmpdir(), 'dsrn-close-cooldown-'));
+  try {
+    const { ctx, route } = makeCtx({ profileContext: { name: 'desktop', dir } });
+    applyPlugin(ctx);
+    const close = route('POST', CLOSE_URL);
+    const restart = route('POST', `${BASE}/restart`);
+
+    // 回执照写：模拟「刚刚开始过一次停机」——close 与 restart 都必须被同一窗口拦下
+    writeFileSync(join(dir, 'restart-now.last.json'),
+      JSON.stringify({ at: new Date().toISOString(), atMs: Date.now() }));
+    const blocked = await call(close, makeReq({ method: 'POST', url: CLOSE_URL }));
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.json().reason, 'cooldown');
+    assert.ok(blocked.json().retryAfterMs > 0 && blocked.json().retryAfterMs <= 5000);
+
+    const restartBlocked = await call(restart, makeReq({ method: 'POST' }));
+    assert.equal(restartBlocked.statusCode, 409, 'close 与 restart 共用冷却判据');
+    assert.equal(restartBlocked.json().reason, 'cooldown');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    plugin.resetCooldown();
+  }
+});
+
+test('U20s7 派发契约：performClose 把 action:"close" 传给 buildHelperScript；回执带 close 标记；全程零真派发', async () => {
+  plugin.resetCooldown();
+  const dir = mkdtempSync(join(tmpdir(), 'dsrn-close-contract-'));
+  const calls = [];
+  try {
+    const { ctx, route } = makeCtx({ profileContext: { name: 'desktop', dir } });
+    applyPlugin(ctx);
+    const result = await plugin.performClose(ctx, { exePath: process.execPath }, {
+      // 仅测试注入：closeHelperReady:true 越过能力闸（否则 CLOSE_HELPER_READY=false 时 501 先行，
+      // 永远到不了派发点）——真实路由的能力闸行为由 U20s4/U20s8 按常量实际取值断言；
+      // buildHelperScript 记录入参后抛错——performStop 在写助手前就会失败，全程不产生任何进程、
+      // 不写任何助手脚本（writeFileSync 求值前 buildHelper 已抛错），errLog 之外零落盘。
+      deps: {
+        closeHelperReady: true,
+        buildHelperScript: (options) => {
+          calls.push(options);
+          throw new Error('spy-stop');
+        },
+      },
+    });
+    assert.equal(result.status, 500);
+    assert.equal(result.reason, 'helper-write-failed');
+    assert.equal(calls.length, 1, 'buildHelperScript 必须被调用恰好一次');
+    const helperOptions = calls[0];
+    assert.equal(helperOptions.action, 'close', '必须把 action:"close" 传给 buildHelperScript（助手分叉的唯一契约）');
+    assert.equal(helperOptions.platform, process.platform, '按宿主真实平台生成助手');
+    assert.equal(helperOptions.exe, process.execPath, 'exe 用配置注入的可用路径（测试进程自身）');
+    assert.ok(Number.isInteger(helperOptions.mainPid) && helperOptions.mainPid > 1, '主进程 pid 取 process.ppid');
+    assert.ok(Number.isInteger(helperOptions.hostPid) && helperOptions.hostPid > 1);
+    assert.ok(String(helperOptions.ack).endsWith('.ack'));
+    assert.ok(String(helperOptions.errLog).endsWith('.err.log'));
+    assert.ok(String(helperOptions.receipt).endsWith('restart-now.last.json'));
+
+    // 回执：开始段照写（冷却判据 atMs 可用），并带 action:'close' 标记供回执半边如实区分
+    const receipt = JSON.parse(readFileSync(join(dir, 'restart-now.last.json'), 'utf8'));
+    assert.equal(receipt.action, 'close');
+    assert.ok(receipt.atMs > 0);
+    assert.ok(Number.isInteger(receipt.hostPid) && receipt.hostPid > 0);
+    assert.ok(Number.isInteger(receipt.mainPid) && receipt.mainPid > 0);
+
+    // 关闭派发与重启共用冷却窗口：随后的 restart 请求被内存 lastDispatchAt 拦下（跨动作一致）
+    const blocked = await call(route('POST', `${BASE}/restart`), makeReq({ method: 'POST' }));
+    assert.equal(blocked.statusCode, 409, 'close 派发后 restart 受同一冷却窗口约束');
+    assert.equal(blocked.json().reason, 'cooldown');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    plugin.resetCooldown();
+  }
+});
+
+gateTest('U20s8 能力闸：助手未实现 close 时 /close 501 且零产物零回执', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsrn-close-cap-'));
+  try {
+    const { ctx, route } = desktopCtx({ profileContext: { name: 'desktop', dir } });
+    applyPlugin(ctx);
+    const res = await call(route('POST', CLOSE_URL), makeReq({ method: 'POST', url: CLOSE_URL }));
+    if (plugin.CLOSE_HELPER_READY) {
+      assert.equal(res.statusCode, 500, '助手已实现时放行到 exe 前置检查（NO_EXE）');
+      assert.equal(res.json().reason, 'exe-not-found');
+    } else {
+      assert.equal(res.statusCode, 501);
+      assert.equal(res.json().ok, false);
+      assert.equal(res.json().reason, 'close-helper-missing');
+    }
+    assert.equal(existsSync(join(dir, 'restart-now.last.json')), false,
+      '501/前置失败都不该写回执（回执 atMs 会误占冷却窗口）');
+    assert.deepEqual(newHelperScripts(), [], '不得写出任何助手脚本');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('U20s9 探测口回报 closeSupported，与 CLOSE_HELPER_READY 同值', async () => {
+  const { ctx, route } = makeCtx({});
+  applyPlugin(ctx);
+  const res = await call(route('GET', `${BASE}/environment`), makeReq({ url: `${BASE}/environment` }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().closeSupported, plugin.CLOSE_HELPER_READY,
+    'closeSupported 是客户端隐藏关闭入口的唯一依据，必须与能力闸一致');
+});
+
+gateTest('U20s10 等待中发起关闭：撤销等待重启并走关闭链路（二者不共存）', async () => {
+  let list = [{ id: 'a1', status: 'running', inbox: { nextTurn: [], nextStep: [] } }];
+  const agents = { list: () => list };
+  const jobs = { list: () => [] };
+  const { ctx, route } = desktopCtx({ agents, jobs });
+  applyPlugin(ctx);
+  const close = route('POST', CLOSE_URL);
+  const restart = route('POST', `${BASE}/restart`);
+  const status = route('GET', `${BASE}/status`);
+
+  const waiting = await call(restart, makeReq({ method: 'POST', url: `${BASE}/restart?wait=1` }));
+  try {
+    assert.equal(waiting.statusCode, 202);
+    list = []; // 任务在等待期间结束
+    const closeRes = await call(close, makeReq({ method: 'POST', url: CLOSE_URL }));
+    if (plugin.CLOSE_HELPER_READY) {
+      assert.equal(closeRes.statusCode, 500);
+      assert.equal(closeRes.json().reason, 'exe-not-found');
+    } else {
+      assert.equal(closeRes.statusCode, 501);
+    }
+    const snap = await call(status, makeReq({ url: `${BASE}/status` }));
+    assert.equal(snap.json().state, 'idle', '发起关闭必须撤销挂着的等待重启（等待终局是重启，与关闭冲突）');
+  } finally {
+    await call(restart, makeReq({ method: 'POST', url: `${BASE}/restart?cancel=1` }));
+  }
 });
 
 // ---- 零派发哨兵（必须最后跑）------------------------------------------------

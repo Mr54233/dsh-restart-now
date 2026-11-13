@@ -40,7 +40,7 @@ function makeElement(tag) {
 }
 
 /** 把 client.js 装进最小浏览器沙箱，返回捕获到的模块导出与记录对象 */
-function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null }) {
+function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null, closeResponder = null }) {
   const captured = { id: null, exports: null };
   const injected = [];
   const appendedStyles = [];
@@ -115,6 +115,16 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
       }
       if (method === 'GET' && String(url).endsWith('/config') && configGetBody) {
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(configGetBody) });
+      }
+      // v1.3.1 仅关闭：POST /close 的可编程响应（closeResponder 返回 {status, body}）。
+      // 未提供时与其它请求一样回 probeBody（status 200 → postClose 走 rejected 兜底分支）。
+      if (method === 'POST' && closeResponder && String(url).indexOf('/plugins/dsh-restart-now/close') !== -1) {
+        const out = closeResponder(String(url), init) || {};
+        return Promise.resolve({
+          ok: Number(out.status) < 400,
+          status: Number(out.status) || 200,
+          json: () => Promise.resolve(out.body || {}),
+        });
       }
       return Promise.resolve({
         ok: true,
@@ -246,6 +256,43 @@ function renderDeep(element) {
   if (!element || typeof element !== 'object') return element;
   if (typeof element.type !== 'function') return element;
   return element.type(element.props || {});
+}
+
+/** 在 React 元素树里按可见文案找 type==='button' 的元素（v1.3.1 仅关闭用例用） */
+function findReactButton(tree, needle) {
+  return (function walk(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) { for (const child of node) { const hit = walk(child); if (hit) return hit; } return null; }
+    if (node.type === 'button' && textOf(node).join('').includes(needle)) return node;
+    if (node.props && node.props.children !== undefined) {
+      const hit = walk(node.props.children);
+      if (hit) return hit;
+    }
+    return Array.isArray(node.children) ? walk(node.children) : null;
+  })(tree);
+}
+
+/** 在 DOM 桩树里按类名找 button 元素（openModal/openConfirm 的 footer 按钮是 DOM 桩） */
+function findDomButton(root, classNameNeedle) {
+  return (function walk(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) { for (const child of node) { const hit = walk(child); if (hit) return hit; } return null; }
+    if (node.tagName === 'BUTTON' && String(node.className || '').includes(classNameNeedle)) return node;
+    return walk(node.children);
+  })(root);
+}
+
+/** DOM 桩树文本：el() 把文字放在 textContent（不走 children），与 textOf 互补 */
+function domText(node, out = []) {
+  if (node === null || node === undefined) return out;
+  if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return out; }
+  if (Array.isArray(node)) { for (const child of node) domText(child, out); return out; }
+  if (typeof node === 'object') {
+    if (node.textContent) out.push(String(node.textContent));
+    if (Array.isArray(node.children)) { for (const child of node.children) domText(child, out); }
+    if (node.props && node.props.children !== undefined) domText(node.props.children, out);
+  }
+  return out;
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -755,5 +802,143 @@ test('U21u 确认框被 x/遮罩/Escape 关闭后，再次点击仍能弹出（i
       return walk(n.children);
     })(root);
   }
+});
+
+// —— v1.3.1 仅关闭（close-only）——
+// 宿主探测口 closeSupported（= 助手已实现 action:'close'）控制一切关闭入口的渲染；
+// 确认文案必须明确「不会自动重启」；忙碌时只有「仍然关闭/取消」，绝无「等空闲后重启」。
+const CLOSE_PROBE = { ...DESKTOP_PROBE, closeSupported: true };
+
+test('U21v 仅关闭：主面板出现「仅关闭」入口，确认文案明确不重启，确认后 POST /close（不带任何 query）', async () => {
+  const { captured, injected, ctx, fetchCalls, modalRoots } = load({ probeBody: CLOSE_PROBE, lang: 'zh-CN' });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  const main = injected.find((i) => i.slotName === 'main');
+  assert.ok(main, 'main 槽位未注册');
+  const tree = renderDeep(main.factory().render({}));
+  const text = textOf(tree).join(' ');
+  assert.ok(text.includes('仅关闭'), `面板应有「仅关闭」按钮：${text.slice(0, 200)}`);
+  assert.ok(text.includes('立即重启'), '重启主按钮仍在（兼容原重启）');
+
+  const closeButton = findReactButton(tree, '仅关闭');
+  assert.ok(closeButton, '面板应有仅关闭按钮元素');
+
+  fetchCalls.length = 0;
+  await closeButton.props.onClick();
+  await flush();
+  assert.equal(modalRoots().length, 1, '仅关闭必须先弹确认框（确认明确）');
+  assert.ok(!fetchCalls.some((c) => String(c.url).endsWith('/close')), '确认前不得发出请求');
+
+  const modalText = domText(modalRoots()[0]).join(' ');
+  assert.ok(modalText.includes('不会自动重启'), `确认文案必须明确不会自动重启：${modalText.slice(0, 220)}`);
+  assert.ok(modalText.includes('手动重新打开'), '确认文案须说明需要手动重开');
+  assert.ok(!modalText.includes('自动回来'), '关闭确认不得复用重启的「窗口自动回来」话术');
+
+  const okButton = findDomButton(modalRoots()[0], 'dsrn-confirm-action');
+  assert.ok(okButton, '确认框应有确认按钮');
+  okButton.__dispatch('click');
+  await flush();
+  const closePost = fetchCalls.find((c) => String(c.url) === '/plugins/dsh-restart-now/close'
+    && c.init && c.init.method === 'POST');
+  assert.ok(closePost, '确认后应 POST /close');
+  assert.equal(closePost.url, '/plugins/dsh-restart-now/close',
+    '不带 query —— close 不复用 ?wait=1（等待终局是重启）');
+});
+
+test('仅关闭始终要求确认，即使重启确认被关闭', async () => {
+  const probeBody = { ...CLOSE_PROBE, config: { ...CLOSE_PROBE.config, confirm: false } };
+  const { captured, injected, ctx, fetchCalls, modalRoots } = load({ probeBody });
+  captured.exports.apply(ctx, {});
+  await flush();
+  const tree = renderDeep(injected.find((i) => i.slotName === 'main').factory().render({}));
+  findReactButton(tree, '仅关闭').props.onClick();
+  assert.equal(modalRoots().length, 1);
+  assert.ok(domText(modalRoots()[0]).join(' ').includes('不会自动重启'));
+  assert.ok(!fetchCalls.some((c) => String(c.url).includes('/close')));
+});
+
+test('U21w 探测口 closeSupported 缺失/false → 不渲染任何仅关闭入口（旧宿主/未实现助手零风险）', async () => {
+  const { captured, injected, ctx, resetHooks, takeEffects } = load({ probeBody: DESKTOP_PROBE, lang: 'zh-CN' });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  const panelText = textOf(renderDeep(injected.find((i) => i.slotName === 'main').factory().render({}))).join(' ');
+  assert.ok(!panelText.includes('仅关闭'), '主面板不应出现仅关闭按钮');
+  assert.ok(panelText.includes('立即重启'), '重启主按钮不受影响');
+
+  const section = injected.find((i) => i.slotName === 'settings.section');
+  assert.ok(section, '设置页槽位未注册');
+  resetHooks();
+  renderDeep(section.factory().render({}));
+  for (const fn of takeEffects()) fn();
+  await flush();
+  await flush();
+  resetHooks();
+  const sectionText = textOf(renderDeep(section.factory().render({}))).join(' ');
+  assert.ok(!sectionText.includes('仅关闭'), '设置页不应出现仅关闭按钮');
+});
+
+test('U21x 设置页「仅关闭」→ 确认 → 409 busy 弹「仍然关闭」二选一（无等待选项）→ 强制带 ?force=1', async () => {
+  const { captured, injected, ctx, fetchCalls, modalRoots, resetHooks, takeEffects } = load({
+    probeBody: CLOSE_PROBE,
+    lang: 'zh-CN',
+    closeResponder: () => ({ status: 409, body: { ok: false, reason: 'busy', tasks: 2, jobs: 1, forceable: true } }),
+  });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  const section = injected.find((i) => i.slotName === 'settings.section');
+  assert.ok(section, '设置页槽位未注册');
+  resetHooks();
+  renderDeep(section.factory().render({}));
+  for (const fn of takeEffects()) fn();
+  await flush();
+  await flush();
+  resetHooks();
+  const tree = renderDeep(section.factory().render({}));
+  assert.ok(textOf(tree).join(' ').includes('仅关闭'), 'closeSupported:true 时设置页应有仅关闭按钮');
+
+  const closeButton = findReactButton(tree, '仅关闭');
+  assert.ok(closeButton, '设置页应有仅关闭按钮元素');
+
+  fetchCalls.length = 0;
+  await closeButton.props.onClick();
+  await flush();
+  assert.equal(modalRoots().length, 1, '先弹确认框');
+
+  const okButton = findDomButton(modalRoots()[0], 'dsrn-confirm-action');
+  assert.ok(okButton, '确认框应有确认按钮');
+  okButton.__dispatch('click');
+  await flush();
+  assert.ok(fetchCalls.some((c) => String(c.url) === '/plugins/dsh-restart-now/close' && c.init.method === 'POST'),
+    '确认后应 POST /close');
+  assert.equal(modalRoots().length, 1, 'busy 弹窗出现');
+
+  const busyText = domText(modalRoots()[0]).join(' ');
+  assert.ok(busyText.includes('仍然关闭'), `busy 弹窗应有「仍然关闭」：${busyText.slice(0, 200)}`);
+  assert.ok(!busyText.includes('等空闲后重启'), '关闭忙碌框不得出现「等空闲后重启」（等待终局是重启）');
+  assert.ok(!busyText.includes('仍然重启'), '关闭忙碌框不得复用重启的「仍然重启」按钮');
+
+  const forceButton = findDomButton(modalRoots()[0], 'dsrn-confirm-action');
+  assert.ok(forceButton, 'busy 弹窗应有强制按钮');
+  fetchCalls.length = 0;
+  forceButton.__dispatch('click');
+  await flush();
+  assert.ok(fetchCalls.some((c) => String(c.url) === '/plugins/dsh-restart-now/close?force=1'),
+    '仍然关闭必须带 ?force=1 POST /close');
+});
+
+test('U21y 仅关闭契约（源码级）：端点/能力位/确认文案/忙碌二选一/501 兜底', () => {
+  assert.ok(source.includes("var CLOSE = '/plugins/dsh-restart-now/close'"), '须定义 close 端点常量');
+  assert.ok(source.includes('closeSupported'), '须消费探测口 closeSupported 能力位');
+  assert.ok(source.includes('不会自动重启'), '中文确认文案须明确不会自动重启');
+  assert.ok(source.includes('does not relaunch'), '英文确认文案须明确不会重启');
+  assert.ok(source.includes("fetch(CLOSE + (query || '')"), '关闭请求必须发往 CLOSE 端点');
+  assert.ok(source.includes("postClose('?force=1')"), 'busy 强制路必须带 ?force=1');
+  assert.ok(source.includes('close-helper-missing'), '须识别宿主 501（助手未实现 close 的兜底话术）');
+  assert.ok(source.includes('function askCloseBusy'), 'close 须有专属忙碌框');
+  assert.ok(!/askCloseBusy[\s\S]{0,600}?waitStart/.test(source), 'close 忙碌框不得复用「等空闲后重启」');
+  assert.ok(source.includes("window.__dsh_restart_now__ = 'closing'"), '关闭后应打 closing 标记');
 });
 

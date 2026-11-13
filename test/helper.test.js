@@ -22,6 +22,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { runInNewContext } from 'node:vm';
 import {
   appleScriptLiteral, ARTIFACT_RE, artifactPaths, buildHelperScript, buildHelperSpawn,
   collectDescendants, HELPER_PLATFORMS, MAC_TOOLS, MAIN_STOP_GRACE_MS, macAlertScript,
@@ -114,18 +115,18 @@ test('U1 助手时序与关键调用', () => {
   assert.ok(script.includes('ATTEMPTS'), '失败须重试');
 
   // v1.1 回归哨兵：WMI/VBS/PowerShell 的**派发层**必须彻底消失。
-  // v1.2.1 起允许一处只读探测（readLaunchArgs 读主进程命令行），但那不参与派发：
-  // 派发仍是 detached spawn(应用 exe)。所以这里禁的是派发形态（wscript / Invoke-CimMethod / .vbs），
+  // v1.2.1 起允许只读探测，但那不参与派发：派发仍是 detached spawn(应用 exe)。
+  // 所以这里禁的是派发形态（wscript / Invoke-CimMethod / .vbs），
   // 以及编码不可靠的 wmic（OEM 码页会毁掉带中文的启动参数）。
   const lowered = script.toLowerCase();
   for (const gone of ['wscript', 'invoke-cimmethod', '.vbs', 'wmic']) {
     assert.ok(!lowered.includes(gone), `v1.1 起不应再出现 ${gone}`);
   }
-  // v1.2.1 起允许两处只读探测（readLaunchArgs 读主进程命令行、waitWebListen 查进程树监听），
-  // 二者都不参与派发：派发仍是 detached spawn(应用 exe)。所以这里禁的是派发形态
-  // （wscript / Invoke-CimMethod / .vbs），以及编码不可靠的 wmic（OEM 码页会毁掉带中文的启动参数）。
+  // v1.2.1 起允许只读探测（waitWebListen 查进程树监听），二者都不参与派发。
+  // v1.3.1 起身份与启动参数合并成一次探测（identitySnapshot 的 mainCmd 字段），
+  // 所以 Get-CimInstance 恰好 4 处：身份 2（main+host）+ hostMatches 1 + 监听 1。
   // 探测必须带超时（不能卡住重启）。
-  assert.equal(lowered.split('get-ciminstance').length - 1, 2, 'WMI 只允许这两处只读探测');
+  assert.equal(lowered.split('get-ciminstance').length - 1, 4, 'WMI 仅供只读身份/参数合并探测与监听探测');
   assert.ok(lowered.includes('timeout:'), '探测须带超时，不能卡住重启');
 });
 
@@ -251,7 +252,10 @@ test('U11c 启动参数复用（darwin）：exe 前缀匹配 + POSIX 分词（�
 test('U11b 助手脚本真的会去问 WMI、并把结果当参数拉起（而不是用空参数）', () => {
   const script = makeScript();
   assert.ok(script.includes('Get-CimInstance -ClassName Win32_Process -Filter'), '须从进程表读主进程命令行');
-  assert.ok(script.includes('readLaunchArgs()'), '须有探测调用');
+  // v1.3.1 合并探测：启动参数取自身份探测带回的 mainCmd，不再单独起一次 powershell
+  assert.ok(script.includes('mainCmd=$m.CommandLine'), '合并探测须带回主进程命令行');
+  assert.ok(script.includes('identity.mainCmd'), '启动参数须取自合并探测结果');
+  assert.ok(!script.includes('launch-args probe failed'), '旧的独立启动参数探针须已移除');
   assert.ok(script.includes('relaunchArgsFrom(rawCommandLine, EXE)'), '须经三重校验');
   assert.ok(script.includes('spawn(EXE, args, '), '拉起时须带参数，不再写死空数组');
   assert.ok(script.includes("'launch_args=unavailable'"), '问不到须留痕（区分「没参数」与「没问到」）');
@@ -442,4 +446,71 @@ test('U14d darwin 纯函数：AppleScript 转义 / 弹窗 / lsof 端口 / ps 进
   assert.deepEqual([...HELPER_PLATFORMS], ['win32', 'darwin']);
   assert.equal(MAIN_STOP_GRACE_MS, 10000, 'macOS 停机宽限默认 10s：给 Electron 体面退出的机会');
   assert.throws(() => buildHelperScript({ platform: 'linux' }), TypeError, '不支持的平台必须显式抛错');
+});
+
+// 在隔离 VM 中执行生成的脚本：所有系统调用均为 mock，绝无真实 kill/spawn。
+async function simulateIdentity(platform, mode) {
+  const files = new Map();
+  const kills = [];
+  let probes = 0;
+  let mainAlive = true;
+  const actual = platform === 'win32' ? 'C:\\App\\Harness.exe' : '/Applications/App.app/Contents/MacOS/App';
+  const target = platform === 'win32' ? 'D:\\Other\\Other.exe' : '/tmp/other';
+  const snap = { mainPath: actual, hostPath: actual, mainStart: 'start1', hostStart: 'start2', hostParent: 1234 };
+  const fs = {
+    writeFileSync: (file, text) => files.set(file, String(text)),
+    appendFileSync: (file, text) => files.set(file, (files.get(file) || '') + text),
+    readFileSync: (file) => { if (!files.has(file)) throw new Error('missing'); return files.get(file); },
+  };
+  const cp = {
+    execFileSync: (file, args) => {
+      if (file === 'taskkill') { kills.push(args); mainAlive = false; return ''; }
+      if (platform === 'win32') {
+        const command = args.at(-1);
+        if (command.includes('mainPath=')) {
+          probes++;
+          if (mode === 'unavailable') throw new Error('access denied');
+          return JSON.stringify({ ...snap, mainPath: mode === 'wrong' ? target : actual,
+            mainStart: mode === 'reuse' && probes > 1 ? 'new-start' : 'start1' });
+        }
+        return '';
+      }
+      if (file === '/bin/ps' && args.includes('lstart=')) {
+        const pid = Number(args[1]);
+        if (pid === 1234) probes++;
+        if (mode === 'unavailable') throw new Error('access denied');
+        const start = mode === 'reuse' && pid === 1234 && probes > 1 ? 'new-start' : 'start1';
+        return (pid === 1234 ? '1 ' : '1234 ') + start;
+      }
+      if (file === '/usr/sbin/lsof' && args.includes('txt')) {
+        const pid = Number(args[args.indexOf('-p') + 1]);
+        return 'p' + pid + '\nftxt\nn' + (mode === 'wrong' ? target : actual) + '\n';
+      }
+      return '';
+    },
+    spawn: () => { throw new Error('unexpected spawn'); },
+  };
+  const proc = { execPath: actual, pid: 9000, env: {}, exit() {}, kill(pid, sig) {
+    if (sig === 0) { if (pid === 1234 && mainAlive) return; const e = new Error('gone'); e.code = 'ESRCH'; throw e; }
+    kills.push([pid, sig]); if (pid === 1234) mainAlive = false;
+  } };
+  const script = buildHelperScript({ platform, exe: target, mainPid: 1234, hostPid: 5678,
+    ack: 'ack', errLog: 'log', receipt: 'receipt', attempts: 0, hostGraceMs: 0 });
+  runInNewContext(script, { require: (name) => name === 'node:fs' ? fs : name === 'node:child_process' ? cp : { dirname: () => '/' },
+    process: proc, setTimeout: (fn) => { queueMicrotask(fn); }, Buffer, console });
+  for (let i = 0; i < 12; i++) await new Promise((resolve) => setImmediate(resolve));
+  return { files, kills };
+}
+
+test('双平台身份校验失败、PID 复用时不杀也不拉起；目标 exe 不参与身份判定', async () => {
+  for (const platform of ['win32', 'darwin']) {
+    for (const mode of ['unavailable', 'wrong', 'reuse']) {
+      const { files, kills } = await simulateIdentity(platform, mode);
+      assert.deepEqual(kills, [], platform + ' ' + mode);
+      assert.equal(JSON.parse(files.get('receipt')).failed.reason, 'identity-verification-failed');
+      assert.match(files.get('log'), /identity/);
+    }
+    const { kills } = await simulateIdentity(platform, 'ok');
+    assert.equal(kills.length, 1, platform + ' 实际运行 exe 与重启目标不同时仍应通过身份判定');
+  }
 });

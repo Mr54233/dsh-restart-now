@@ -63,6 +63,22 @@ test('U19d summarizeReceipt：成功 → status ok 且带停机时长', () => {
   assert.equal(summary.ageMs, 60_000);
 });
 
+test('回执保留监听观测并区分无结果，不将探测作为启动成功的证明', () => {
+  for (const verdict of ['ok', 'timeout', 'unsupported']) {
+    const summary = summarizeReceipt({ respawnedAt: 'x', webListen: { verdict } });
+    assert.equal(summary.status, 'ok');
+    assert.deepEqual(summary.webListen, { verdict });
+  }
+  assert.equal(summarizeReceipt({ respawnedAt: 'x' }).webListen, undefined);
+  assert.equal(summarizeReceipt({ respawnedAt: 'x', webListen: { verdict: 'invalid' } }).webListen, undefined);
+});
+
+test('仅关闭回执区分已关闭与失败', () => {
+  assert.equal(summarizeReceipt({ action: 'close', closedAt: 'now' }).status, 'closed');
+  assert.equal(summarizeReceipt({ action: 'close', closedAt: 'now', failed: { reason: 'x' } }).status, 'failed');
+  assert.equal(summarizeReceipt({ action: 'close' }).status, 'unconfirmed');
+});
+
 test('U19e summarizeReceipt：失败 → status failed 且带原因（助手拉起失败）', () => {
   const summary = summarizeReceipt({
     at: new Date(NOW).toISOString(), atMs: NOW,
