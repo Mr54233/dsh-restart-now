@@ -753,6 +753,69 @@ gateTest('U20s10 等待中发起关闭：撤销等待重启并走关闭链路（
   }
 });
 
+test('只读预检：围栏和平台鉴权、方法限制', async () => {
+  const { ctx, route } = desktopCtx({ connection: { requestRejection: () => 401 } });
+  applyPlugin(ctx);
+  const preflight = route('GET', `${BASE}/preflight`);
+  const method = await call(preflight, makeReq({ method: 'POST' }));
+  assert.equal(method.statusCode, 405);
+  assert.equal(method.headers.allow, 'GET');
+  const cross = await call(preflight, makeReq({ headers: { origin: 'https://evil.example' } }));
+  assert.equal(cross.json().reason, 'untrusted');
+  const denied = await call(preflight, makeReq());
+  assert.equal(denied.statusCode, 401);
+  assert.equal(denied.json().reason, 'unauthorized');
+});
+
+test('只读预检：报告 busy、锁和未知身份，保留残锁与 profile 内容', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsrn-preflight-'));
+  try {
+    mkdirSync(join(dir, '.plugin-manager'));
+    const lock = join(dir, '.plugin-manager', 'run.json');
+    const contents = JSON.stringify({ pid: process.pid });
+    writeFileSync(lock, contents);
+    const agents = { list: () => [{ id: 'a', status: 'running' }] };
+    const jobs = { list: () => [{ id: 'j', status: 'running' }] };
+    const { ctx, route } = desktopCtx({ profileContext: { name: 'desktop', dir }, agents, jobs });
+    applyPlugin(ctx);
+    const preflight = route('GET', `${BASE}/preflight`);
+    const res = await call(preflight, makeReq());
+    assert.equal(res.statusCode, 200);
+    const body = res.json();
+    assert.equal(body.readOnly, true);
+    assert.match(body.disclaimer, /does not guarantee/);
+    assert.equal(body.checks.lock.state, 'locked');
+    assert.deepEqual(body.checks.busy, { state: 'busy', tasks: 1, jobs: 1 });
+    assert.equal(body.checks.mainProcess.identity, 'unknown');
+    assert.equal(body.checks.executable.usable, false);
+    assert.equal(readFileSync(lock, 'utf8'), contents);
+    assert.deepEqual(readdirSync(dir), ['.plugin-manager']);
+    writeFileSync(lock, 'invalid');
+    const malformed = await call(preflight, makeReq());
+    assert.equal(malformed.json().checks.lock.state, 'unknown');
+    assert.equal(readFileSync(lock, 'utf8'), 'invalid');
+    // 对确定不存在的 PID 验证残锁不会被预检清理。
+    let missingPid;
+    for (const pid of [2147483647, 99999999, 9999999]) {
+      try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') { missingPid = pid; break; } }
+    }
+    if (missingPid) {
+      const stale = JSON.stringify({ pid: missingPid });
+      writeFileSync(lock, stale);
+      const observed = await call(preflight, makeReq());
+      assert.equal(observed.json().checks.lock.state, 'stale');
+      assert.equal(readFileSync(lock, 'utf8'), stale);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('只读预检：服务不可用或异常不能误报空闲', async () => {
+  const { ctx, route } = desktopCtx({ agents: { list: () => [] }, jobs: { list: () => { throw new Error('unavailable'); } } });
+  applyPlugin(ctx);
+  const res = await call(route('GET', `${BASE}/preflight`), makeReq());
+  assert.equal(res.json().checks.busy.state, 'unknown');
+});
+
 // ---- 零派发哨兵（必须最后跑）------------------------------------------------
 // 前面每个用例都不允许真的派发助手；但夹具一旦回退（例如 applyPlugin 被绕过、
 // 平台白名单又变了），最快的暴露方式就是看 TMPDIR 有没有新的 helper 脚本：

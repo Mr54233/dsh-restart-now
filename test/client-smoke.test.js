@@ -47,7 +47,7 @@ function makeElement(tag) {
 }
 
 /** 把 client.js 装进最小浏览器沙箱，返回捕获到的模块导出与记录对象 */
-function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null, closeResponder = null, restartResponder = null, envResponder = null, windowsMenu = null }) {
+function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null, closeResponder = null, restartResponder = null, envResponder = null, windowsMenu = null, preflightResponder = null }) {
   const captured = { id: null, exports: null };
   const injected = [];
   const appendedStyles = [];
@@ -157,6 +157,14 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
       }
       if (method === 'GET' && String(url).endsWith('/config') && configGetBody) {
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(configGetBody) });
+      }
+      if (method === 'GET' && preflightResponder && String(url) === '/plugins/dsh-restart-now/preflight') {
+        const out = preflightResponder();
+        if (out.fail) return Promise.reject(new Error('simulated network failure'));
+        return Promise.resolve({
+          ok: out.status < 400, status: out.status,
+          json: () => out.invalidJson ? Promise.reject(new Error('invalid JSON')) : Promise.resolve(out.body),
+        });
       }
       // v1.3.1 仅关闭：POST /close 的可编程响应（closeResponder 返回 {status, body}）。
       // 未提供时与其它请求一样回 probeBody（status 200 → postClose 走 rejected 兜底分支）。
@@ -611,6 +619,70 @@ test('U21f 设置页区块渲染成功，加载态/版本行文案来自字典�
   // 初始加载态来自 t('configLoading')；版本行来自 liveMeta（探测口已回传 0.2.1-rc.2）
   assert.ok(/配置加载中|Loading settings/.test(text), `加载态文案缺失：${text.slice(0, 120)}`);
   assert.ok(!/undefined|NaN/.test(text), `渲染出未定义值：${text.slice(0, 200)}`);
+});
+
+test('设置页预检按钮展示只读快照及安全和身份限制（中英文）', async () => {
+  for (const [lang, buttonText, safety, identity] of [
+    ['zh-CN', '重启前预检', '不保证之后重启安全', '主进程身份及启动参数未在预检中核验'],
+    ['en-US', 'Restart preflight', 'does not guarantee a future restart is safe', 'Process identity and launch arguments are not verified'],
+  ]) {
+    const app = load({ probeBody: DESKTOP_PROBE, lang, preflightResponder: () => ({ status: 200, body: {
+      ok: true, checks: { environment: 'desktop', platformSupported: true, enabled: true,
+        lock: { state: 'free' }, busy: { tasks: 2, jobs: 3 }, cooldownMs: 123,
+        executable: { path: 'C:\\Example\\app.exe', usable: true }, mainProcess: { pid: 4321 } },
+    } }) });
+    app.captured.exports.apply(app.ctx, {});
+    await flush();
+    const section = app.injected.find((i) => i.slotName === 'settings.section').factory();
+    app.resetHooks();
+    renderDeep(section.render({}));
+    for (const effect of app.takeEffects()) effect();
+    await flush();
+    app.resetHooks();
+    const button = findReactButton(renderDeep(section.render({})), buttonText);
+    assert.ok(button, `${lang} 设置页应有预检按钮`);
+    app.fetchCalls.length = 0;
+    button.props.onClick();
+    await flush();
+    assert.equal(app.fetchCalls.length, 1);
+    const request = app.fetchCalls[0];
+    assert.equal(request.url, '/plugins/dsh-restart-now/preflight');
+    assert.ok(!request.init.method || request.init.method === 'GET');
+    assert.equal(request.init.credentials, 'same-origin');
+    assert.equal(request.init.cache, 'no-store');
+    assert.equal(app.modalRoots().length, 1);
+    const text = domText(app.modalRoots()[0]).join(' ');
+    assert.ok(text.includes(safety), text);
+    assert.ok(text.includes(identity), text);
+    for (const value of ['desktop', 'free', '123', '4321', 'C:\\Example\\app.exe']) assert.ok(text.includes(value), text);
+  }
+});
+
+test('设置页预检失败时展示错误而不是成功快照', async () => {
+  for (const [response, reason] of [
+    [{ status: 503, body: { ok: false, reason: 'unavailable' } }, 'unavailable'],
+    [{ status: 200, body: { ok: true } }, 'unknown'],
+    [{ fail: true }, 'network error'],
+    [{ status: 200, invalidJson: true }, 'network error'],
+  ]) {
+    const app = load({ probeBody: DESKTOP_PROBE, preflightResponder: () => response });
+    app.captured.exports.apply(app.ctx, {});
+    await flush();
+    const section = app.injected.find((i) => i.slotName === 'settings.section').factory();
+    app.resetHooks();
+    renderDeep(section.render({}));
+    for (const effect of app.takeEffects()) effect();
+    await flush();
+    app.resetHooks();
+    const button = findReactButton(renderDeep(section.render({})), '重启前预检');
+    assert.ok(button);
+    button.props.onClick();
+    await flush();
+    assert.equal(app.modalRoots().length, 1);
+    const text = domText(app.modalRoots()[0]).join(' ');
+    assert.ok(text.includes('预检不可用') && text.includes(reason), text);
+    assert.ok(!text.includes('不保证之后重启安全'), text);
+  }
 });
 
 test('U21g 侧栏行渲染成功且宽态显示本地化标题，窄态只有图标', async () => {
