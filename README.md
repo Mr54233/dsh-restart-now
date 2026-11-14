@@ -36,7 +36,7 @@ dsh plugin --profile desktop add dsh-restart-now
 
 ![另外两个轻量入口](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/screenshot-3-entries.png)
 
-五个界面入口都能在 **设置 → 重启应用** 里单独关掉（关掉即从界面撤除）；
+五个界面入口（侧栏面板、侧栏底部、会话标题栏、窗口菜单栏、设置行）都能在 **设置 → 重启应用** 里单独关掉（关掉即从界面撤除）；
 `/restart` 不受界面入口开关影响，但需要宿主命令服务，且仍受总开关、环境和安全门禁约束。设置页同时显示运行版本自检、上次重启结果（停机时长或失败原因）、
 只读**重启前预检**，以及各入口统一的进行中状态（旋转 spinner + 「正在重启…/正在关闭…」，
 跨入口同步禁用防连点）。
