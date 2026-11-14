@@ -19,14 +19,15 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 const EIGHT = (patch = {}) => ({
   allowRestart: true, confirm: true, exePath: '', platformAuth: true,
   entryPanel: true, entryFooter: true, entryHeader: true, entrySettingsRow: true,
+  entryTitlebar: true,
   ...patch,
 });
 
-test('U12a DEFAULTS 冻结且八键正确（v1.2.2：删 hideSidebarButton，加四个 entry 键）', () => {
+test('U12a DEFAULTS 冻结且九键正确（v1.3.1：加 entryTitlebar）', () => {
   assert.deepEqual({ ...DEFAULTS }, EIGHT());
   assert.deepEqual(Object.keys(DEFAULTS).sort(), Object.keys(EIGHT()).sort(), '键集合不多不少');
   assert.throws(() => { 'use strict'; DEFAULTS.allowRestart = false; }, TypeError);
-  assert.deepEqual([...ENTRY_KEYS], ['entryPanel', 'entryFooter', 'entryHeader', 'entrySettingsRow']);
+  assert.deepEqual([...ENTRY_KEYS], ['entryPanel', 'entryFooter', 'entryHeader', 'entrySettingsRow', 'entryTitlebar']);
   assert.ok(Object.isFrozen(ENTRY_KEYS), 'ENTRY_KEYS 也应冻结');
 });
 
@@ -51,14 +52,15 @@ test('U12b resolveConfigFile 优先级 DSH_PROFILE_DIR > DSH_HOME/profiles/<name
   assert.equal(resolveConfigFile({}), null, '全空环境返回 null（调用方须容忍）');
 });
 
-test('U12c clampConfig 只收 8 个合法键并收紧类型（v1.2.2）', () => {
+test('U12c clampConfig 只收 9 个合法键并收紧类型（v1.3.1：entryTitlebar）', () => {
   assert.deepEqual(clampConfig({ allowRestart: false, confirm: true, delayMs: 123.7, exePath: '  x.exe  ' }),
     { allowRestart: false, confirm: true, exePath: 'x.exe' }, 'v1.1 起 delayMs 属未知键，被丢弃');
   assert.deepEqual(clampConfig({ platformAuth: false }), { platformAuth: false }, 'v1.2.1 逃生门键');
   assert.deepEqual(clampConfig({ platformAuth: 'no' }), {}, '非布尔值的逃生门丢弃（默认保持强制）');
-  assert.deepEqual(clampConfig({ entryPanel: false, entryFooter: false, entryHeader: false, entrySettingsRow: false }),
-    { entryPanel: false, entryFooter: false, entryHeader: false, entrySettingsRow: false }, 'v1.2.2 四个入口键');
+  assert.deepEqual(clampConfig({ entryPanel: false, entryFooter: false, entryHeader: false, entrySettingsRow: false, entryTitlebar: false }),
+    { entryPanel: false, entryFooter: false, entryHeader: false, entrySettingsRow: false, entryTitlebar: false }, 'v1.3.1 五个入口键');
   assert.deepEqual(clampConfig({ entryPanel: 'off' }), {}, '入口键非布尔值丢弃');
+  assert.deepEqual(clampConfig({ entryTitlebar: 'off' }), {}, 'entryTitlebar 非布尔值丢弃');
   assert.deepEqual(clampConfig({ delayMs: 999999 }), {}, 'delayMs 已是未知键');
   assert.deepEqual(clampConfig({ evil: 1, delayMs: '100', entryHeader: 0 }), {}, '未知键与非布尔值丢弃');
   assert.deepEqual(clampConfig(null), {});
@@ -83,7 +85,7 @@ test('U12e saveFileConfig 原子语义（写即合法 JSON）+ 返回 clamp 结�
   assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { allowRestart: false, confirm: false });
 });
 
-test('U12f effectiveConfig 三层合并：默认 < patch < 文件（八键）', () => {
+test('U12f effectiveConfig 三层合并：默认 < patch < 文件（九键；旧文件无 entryTitlebar 键时默认 true 生效）', () => {
   const f = join(dir, 'restart-now.config.json');
   saveFileConfig(f, { confirm: false, entryHeader: false });
   const eff = effectiveConfig({ allowRestart: false, exePath: 'patch.exe' }, f);
@@ -93,6 +95,8 @@ test('U12f effectiveConfig 三层合并：默认 < patch < 文件（八键）', 
     exePath: 'patch.exe',  // patch 层
     entryHeader: false,    // 文件层压过默认（v1.2.2）
   }));
+  // 旧配置文件（v1.3.1 前只有八键）读进来：entryTitlebar 走默认 true，不触发迁移语义
+  assert.equal(eff.entryTitlebar, true, '旧文件没写过 entryTitlebar → DEFAULTS 的 true 直接生效');
   // patch 层也接受入口键
   assert.deepEqual(effectiveConfig({ entrySettingsRow: false }, join(dir, 'none.json')),
     EIGHT({ entrySettingsRow: false }), '无文件时 patch 层的 entry 键直接生效');

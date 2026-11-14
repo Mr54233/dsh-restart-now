@@ -40,7 +40,7 @@ function makeElement(tag) {
 }
 
 /** 把 client.js 装进最小浏览器沙箱，返回捕获到的模块导出与记录对象 */
-function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null, closeResponder = null }) {
+function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null, closeResponder = null, restartResponder = null, envResponder = null }) {
   const captured = { id: null, exports: null };
   const injected = [];
   const appendedStyles = [];
@@ -87,12 +87,22 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
   const docHandlers = {};
 
   const fetchCalls = [];
+  // v1.3.1 有界轮询（watchRestartOutcome）测试设施：
+  //   intervals —— setInterval 不真跑，收集回调，测试用 tickIntervals() 手动触发一整轮；
+  //   clock/Date —— client.js 只用 Date.now()（20s 判定线与 90s 总预算），桩成可推进的时钟；
+  //   envState —— GET /environment 的**挂载后**可编程响应（探测与轮询同路径：挂载必须吃
+  //     真实形态的探测响应才能挂上入口，轮询想模拟 failed/unconfirmed/服务没了由用例改写）。
+  const intervals = [];
+  const envState = { body: null, fail: false };
+  let clockNow = 1700000000000;
+  const clock = { advance: (ms) => { clockNow += Number(ms) || 0; } };
   const sandbox = {
     console,
     setTimeout: () => 0,
     clearTimeout: () => {},
-    setInterval: () => 0,
-    clearInterval: () => {},
+    setInterval: (fn, ms) => { const entry = { id: intervals.length + 1, fn, ms }; intervals.push(entry); return entry.id; },
+    clearInterval: (id) => { const i = intervals.findIndex((e) => e.id === id); if (i >= 0) intervals.splice(i, 1); },
+    Date: { now: () => clockNow },
     document,
     navigator: { language: lang },
     fetch: (url, init) => {
@@ -124,6 +134,36 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
           ok: Number(out.status) < 400,
           status: Number(out.status) || 200,
           json: () => Promise.resolve(out.body || {}),
+        });
+      }
+      // v1.3.1 有界轮询：POST /restart 的可编程响应（restartResponder 返回 {status, body}），
+      // 202 派发成功路径必须 202 才会启动轮询；未提供时回 probeBody（status 200 → rejected 分支）。
+      if (method === 'POST' && restartResponder && String(url).indexOf('/plugins/dsh-restart-now/restart') !== -1) {
+        const out = restartResponder(String(url), init) || {};
+        return Promise.resolve({
+          ok: Number(out.status) < 400,
+          status: Number(out.status) || 200,
+          json: () => Promise.resolve(out.body || {}),
+        });
+      }
+      // v1.3.1 有界轮询：GET /environment 的可编程响应（启动探测与轮询共用同一路径）。
+      // envState.fail=true 模拟服务没了（正常停机进行中 → fetch 抛错 → 轮询静默停止）；
+      // envState.body 非空时优先（挂载后由用例改写，喂给轮询），否则回探测口真身 probeBody。
+      if (method === 'GET' && String(url).indexOf('/plugins/dsh-restart-now/environment') !== -1) {
+        if (envState.fail) return Promise.reject(new Error('simulated: server gone'));
+        const payload = envState.body || probeBody;
+        return Promise.resolve({
+          ok: true, status: 200,
+          json: () => Promise.resolve(payload),
+        });
+      }
+      // 兼容：仍提供 envResponder 的旧式可编程探测（挂载期即生效）
+      if (method === 'GET' && envResponder && String(url).indexOf('/plugins/dsh-restart-now/environment') !== -1) {
+        const out = envResponder(String(url), init) || {};
+        if (out && out.fail) return Promise.reject(new Error('simulated: server gone'));
+        return Promise.resolve({
+          ok: true, status: 200,
+          json: () => Promise.resolve(out.body !== undefined ? out.body : out),
         });
       }
       return Promise.resolve({
@@ -189,10 +229,12 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
   const pressEscape = () => { for (const fn of [...(docHandlers.keydown || [])]) fn({ key: 'Escape', stopPropagation() {} }); };
   // 当前挂着的模态根节点（openModal appendChild 到 body；关闭后应被移除）
   const modalRoots = () => document.body.children.filter((n) => String(n.className || '').includes('dsrn-modal-root'));
+  // 手动触发一整轮 interval 回调（拷贝数组：回调里可能 clearInterval 自停）
+  const tickIntervals = () => { for (const entry of [...intervals]) entry.fn(); };
   return {
     captured, injected, appendedStyles, fetchCalls, ctx, createElement,
     localeInjections, effects, store, configPosts, resetHooks, takeEffects, react,
-    document, pressEscape, modalRoots,
+    document, pressEscape, modalRoots, intervals, clock, tickIntervals, envState,
   };
 }
 
@@ -200,10 +242,11 @@ const DESKTOP_PROBE = {
   ok: true,
   environment: 'desktop',
   platform: 'win32',
-  // v1.2.2：入口开关进了配置层（八键），旧键 hideSidebarButton 已废弃
+  // v1.3.1：入口开关九键（v1.2.2 八键 + entryTitlebar），旧键 hideSidebarButton 已废弃
   config: {
     allowRestart: true, confirm: true, exePath: '', platformAuth: true,
     entryPanel: true, entryFooter: true, entryHeader: true, entrySettingsRow: true,
+    entryTitlebar: true,
   },
   derivedExe: 'D:\\dsh\\DeepSeek Harness.exe',
   // v1.2.2 勘误：迁移判据来自服务端 entriesDeclared（不能看 config——eff 必然含 DEFAULTS 四键）
@@ -282,6 +325,41 @@ function findDomButton(root, classNameNeedle) {
   })(root);
 }
 
+/** React 元素树里第一个 type==='button' 的元素（dsrn-gen 行 / 标题栏钮等单按钮树用） */
+function firstButton(tree) {
+  return (function walk(node) {
+    if (!node || typeof node === 'string' || typeof node === 'number') return null;
+    if (Array.isArray(node)) { for (const child of node) { const hit = walk(child); if (hit) return hit; } return null; }
+    if (node.type === 'button') return node;
+    if (node.props && node.props.children !== undefined) { const hit = walk(node.props.children); if (hit) return hit; }
+    return Array.isArray(node.children) ? walk(node.children) : null;
+  })(tree);
+}
+
+/** 找入口开关行（SwitchField：div.dsrn-field，label 文本含 needle） */
+function findSwitchRow(tree, labelNeedle) {
+  const rows = [];
+  (function collect(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(collect); return; }
+    if (node.props && node.props.className === 'dsrn-field') rows.push(node);
+    if (node.props && node.props.children !== undefined) collect(node.props.children);
+    if (Array.isArray(node.children)) node.children.forEach(collect);
+  })(tree);
+  return rows.find((row) => textOf(row).join(' ').includes(labelNeedle)) || null;
+}
+
+/** 开关行内的 switch 按钮（button[role=switch]，onClick → onChange(!checked)） */
+function firstRoleSwitch(tree) {
+  return (function walk(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) { for (const child of node) { const hit = walk(child); if (hit) return hit; } return null; }
+    if (node.type === 'button' && node.props && node.props.role === 'switch') return node;
+    if (node.props && node.props.children !== undefined) { const hit = walk(node.props.children); if (hit) return hit; }
+    return Array.isArray(node.children) ? walk(node.children) : null;
+  })(tree);
+}
+
 /** DOM 桩树文本：el() 把文字放在 textContent（不走 children），与 textOf 互补 */
 function domText(node, out = []) {
   if (node === null || node === undefined) return out;
@@ -331,12 +409,13 @@ test('U21b2 darwin 探测响应 → 挂载全部入口（v1.3.0 白名单）', a
     'main',
     'settings.general.item',
     'settings.section',
+    'shell.overlay',
     'sidebar.footer.action',
     'sidebar.panellist',
-  ], 'darwin 桌面必须与 win32 一样挂载全部入口（v1.3.0 白名单含 macOS）');
+  ], 'darwin 桌面必须与 win32 一样挂载全部入口（v1.3.0 白名单含 macOS；v1.3.1 +shell.overlay）');
 });
 
-test('U21c desktop 环境 → 挂载配置页 + 四个入口（panellist/main 成对）', async () => {
+test('U21c desktop 环境 → 挂载配置页 + 五个入口（panellist/main 成对，v1.3.1 +shell.overlay）', async () => {
   const { captured, injected, ctx, createElement } = load({ probeBody: DESKTOP_PROBE });
   captured.exports.apply(ctx, {});
   await flush();
@@ -346,6 +425,7 @@ test('U21c desktop 环境 → 挂载配置页 + 四个入口（panellist/main �
     'main',
     'settings.general.item',
     'settings.section',
+    'shell.overlay',
     'sidebar.footer.action',
     'sidebar.panellist',
   ]);
@@ -375,13 +455,15 @@ test('U21c2 关掉的入口连注册一起撤掉（不是渲染成空，而是�
   // v1.2.2：配置层还没有 entry 键（老配置）→ 首帧缓存里的旧值是唯一已知值
   const { captured, injected, ctx } = load({
     probeBody: LEGACY_PROBE,
-    entries: { panel: true, footer: false, header: false, settingsRow: true },
+    entries: { panel: true, footer: false, header: false, settingsRow: true, titlebar: true },
   });
   captured.exports.apply(ctx, {});
   await flush();
 
   const slots = injected.map((i) => i.slotName).sort();
-  assert.deepEqual(slots, ['main', 'settings.general.item', 'settings.section', 'sidebar.panellist']);
+  assert.deepEqual(slots, [
+    'main', 'settings.general.item', 'settings.section', 'shell.overlay', 'sidebar.panellist',
+  ]);
   assert.ok(!slots.includes('sidebar.footer.action'), 'footer 已关，不该注册');
   assert.ok(!slots.includes('conversation.session.header.actions'), 'header 已关，不该注册');
   // 配置页必须始终在，否则关完入口就再也回不来了
@@ -391,7 +473,7 @@ test('U21c2 关掉的入口连注册一起撤掉（不是渲染成空，而是�
 test('U21c3 全部入口关掉后仍保留配置页 + 插件卸载时撤销自己注册的入口', async () => {
   const { captured, injected, ctx, effects } = load({
     probeBody: LEGACY_PROBE,
-    entries: { panel: false, footer: false, header: false, settingsRow: false },
+    entries: { panel: false, footer: false, header: false, settingsRow: false, titlebar: false },
   });
   captured.exports.apply(ctx, {});
   await flush();
@@ -645,10 +727,11 @@ test('U21l 侧栏面板页：标题/说明/版本行/上次重启都在，且主
   assert.ok(glyph && typeof glyph === 'object', 'panellist 图标未返回元素');
 });
 
-test('U21m v1.2 入口文案两语言齐备（含面板/标题栏/设置行/入口组）', () => {
+test('U21m v1.2 入口文案两语言齐备（含面板/标题栏/设置行/入口组/停机轮询失败可见）', () => {
   for (const key of ['entryGroup', 'entryPanel', 'entryFooter', 'entryHeader',
-    'entrySettingsRow', 'entryCommandHint', 'panelTitle', 'panelDesc',
-    'headerLabel', 'settingsRowLabel', 'settingsRowHint']) {
+    'entrySettingsRow', 'entryTitlebar', 'entryCommandHint', 'panelTitle', 'panelDesc',
+    'headerLabel', 'settingsRowLabel', 'settingsRowHint',
+    'restartAborted', 'restartNotEffective', 'closeAborted', 'closeNotEffective']) {
     const hits = source.split(key + ':').length - 1;
     assert.ok(hits >= 2, `文案键 ${key} 应同时出现在 zh 与 en 里`);
   }
@@ -940,5 +1023,306 @@ test('U21y 仅关闭契约（源码级）：端点/能力位/确认文案/忙碌
   assert.ok(source.includes('function askCloseBusy'), 'close 须有专属忙碌框');
   assert.ok(!/askCloseBusy[\s\S]{0,600}?waitStart/.test(source), 'close 忙碌框不得复用「等空闲后重启」');
   assert.ok(source.includes("window.__dsh_restart_now__ = 'closing'"), '关闭后应打 closing 标记');
+});
+
+// —— v1.3.1 停机后有界轮询（watchRestartOutcome）——
+// 正常路径进程 <1s 就死、窗口关闭、新实例拉起（页面死掉 = fetch 抛错 = 静默，绝不弹窗）；
+// 失败路径（助手身份核验拒绝等）进程活着、页面还在——202 后只打标记毫无反馈是本轮要修的缺陷。
+// 判定线：页面活过 20s 才下结论；90s 总预算到点放弃。busy.v 在失败可见时复位（按钮恢复可用）。
+
+/** 202 派发成功 + 走确认框路径点完「重启」，返回轮询测试所需的沙箱件。
+ *  探测口响应在**挂载之后**才可编程（env.__envBody）：挂载必须吃真实形态的探测响应，
+ *  轮询想模拟什么形态（failed/unconfirmed/缺字段/服务没了）由各用例随后改写。 */
+async function dispatchRestart202(opts = {}) {
+  const env = load({
+    ...opts,
+    restartResponder: opts.restartResponder || (() => ({ status: 202, body: { ok: true, mode: 'now' } })),
+  });
+  env.captured.exports.apply(env.ctx, {});
+  await flush();
+  const row = env.injected.find((i) => i.slotName === 'settings.general.item');
+  const button = firstButton(renderDeep(row.factory().render({})));
+  // confirm:true → 弹确认框，点确认按钮才真正 POST
+  await button.props.onClick();
+  await flush();
+  const okButton = findDomButton(env.modalRoots()[0], 'dsrn-confirm-action');
+  okButton.__dispatch('click');
+  await flush();
+  return env;
+}
+
+test('U21z 202 重启派发后启动有界轮询：20s 内成功响应不下结论（还在停机早期）', async () => {
+  const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
+  const { fetchCalls, intervals, modalRoots, clock, tickIntervals } = env;
+  assert.ok(fetchCalls.some((c) => String(c.url) === '/plugins/dsh-restart-now/restart' && c.init.method === 'POST'),
+    '前置：确认后应 POST /restart');
+  assert.equal(intervals.length, 1, '202 且非 waiting 模式后应启动一个轮询 interval');
+  fetchCalls.length = 0;
+  modalRoots().forEach((m) => m.parentNode.removeChild(m));
+
+  // 第 1 tick（2s）：服务还在（200/ok），但页面没活过 20s → 不下结论，弹窗不该出现
+  env.envState.body = { ok: true, lastRestart: { status: 'unconfirmed' } };
+  clock.advance(2000);
+  tickIntervals();
+  await flush();
+  assert.equal(modalRoots().length, 0, '20s 内不该对成功响应下失败结论');
+  assert.equal(intervals.length, 1, '20s 内轮询应继续跑');
+  assert.equal(intervals[0].ms, 2000, '轮询间隔须为 2000ms');
+  assert.equal(fetchCalls.length, 1, '一个 tick 恰好拉一次探测口');
+  assert.ok(String(fetchCalls[0].url).indexOf('/plugins/dsh-restart-now/environment') !== -1,
+    '轮询拉的是 GET /environment');
+  assert.equal(fetchCalls[0].init && fetchCalls[0].init.credentials, 'same-origin', '轮询须带同源凭据');
+});
+
+test('U21z2 轮询拿到 failed 回执 → 弹「重启已中止：原因」+ busy 复位 + 轮询停止', async () => {
+  const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
+  const { intervals, modalRoots, clock, tickIntervals } = env;
+  modalRoots().forEach((m) => m.parentNode.removeChild(m));
+  env.envState.body = { ok: true, lastRestart: { status: 'failed', reason: 'identity-verification-failed' } };
+  clock.advance(21000); // 从 202 起页面活过 20s（判定线是 >20000，恰好 20000 仍在观望窗内）
+  tickIntervals();
+  await flush();
+  await flush();
+  assert.equal(intervals.length, 0, '发现失败后轮询必须停止');
+  assert.equal(modalRoots().length, 1, '失败必须弹窗可见');
+  const text = domText(modalRoots()[0]).join(' ');
+  assert.ok(text.includes('重启已中止'), `中文文案应为「重启已中止：原因」，实际：${text.slice(0, 200)}`);
+  assert.ok(text.includes('identity-verification-failed'), `弹窗须带助手失败原因，实际：${text.slice(0, 200)}`);
+  assert.ok(text.includes('设置→重启应用'), '话术须指路设置页（详情入口）');
+  // busy 复位的界面证据：busy.v=false 后再次点击能立刻走到 POST（不再被 busy 吞掉）
+  env.fetchCalls.length = 0;
+  const row = env.injected.find((i) => i.slotName === 'settings.general.item');
+  await firstButton(renderDeep(row.factory().render({}))).props.onClick();
+  await flush();
+  let ok2 = null;
+  for (const root of env.modalRoots()) ok2 = findDomButton(root, 'dsrn-confirm-action') || ok2;
+  ok2.__dispatch('click');
+  await flush();
+  assert.ok(env.fetchCalls.some((c) => String(c.url) === '/plugins/dsh-restart-now/restart' && c.init.method === 'POST'),
+    'busy.v 必须已复位：失败可见后按钮立即可再次发起');
+});
+
+test('U21z3 回执一直无 failed（unconfirmed）→「重启似乎没有生效」+ busy 复位 + 停轮询', async () => {
+  const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
+  const { intervals, modalRoots, clock, tickIntervals } = env;
+  modalRoots().forEach((m) => m.parentNode.removeChild(m));
+  env.envState.body = { ok: true, lastRestart: { status: 'unconfirmed' } };
+  clock.advance(22000); // 从 202 起页面已活过 20s
+  tickIntervals();
+  await flush();
+  await flush();
+  assert.equal(intervals.length, 0, 'unconfirmed 结话后轮询必须停止');
+  assert.equal(modalRoots().length, 1, '重启没生效必须弹窗可见');
+  const text = domText(modalRoots()[0]).join(' ');
+  assert.ok(text.includes('重启似乎没有生效'), `应弹「重启似乎没有生效：应用仍在运行」，实际：${text.slice(0, 200)}`);
+});
+
+test('U21z4 fetch 抛错（服务没了 = 正常停机进行中）→ 静默停止轮询，绝不弹窗', async () => {
+  const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
+  const { intervals, modalRoots, clock, tickIntervals } = env;
+  modalRoots().forEach((m) => m.parentNode.removeChild(m));
+  env.envState.fail = true;
+  clock.advance(2000);
+  tickIntervals();
+  await flush();
+  await flush();
+  assert.equal(intervals.length, 0, '服务没了（正常停机）轮询应停止');
+  assert.equal(modalRoots().length, 0, '正常停机路径必须静默（窗口马上要关）');
+});
+
+test('U21z5 90s 总预算到点放弃：轮询停止、不弹窗、busy 复位', async () => {
+  // lastRestart.status:'pending' 不满足任何结论分支（failed/ok/closed/unconfirmed 都不是）
+  // → 只有预算判据能结束轮询，正好单独验证 90s 总预算分支
+  const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
+  const { intervals, modalRoots, clock, tickIntervals } = env;
+  modalRoots().forEach((m) => m.parentNode.removeChild(m));
+  env.envState.body = { ok: true, lastRestart: { status: 'pending' } };
+  clock.advance(92000);
+  tickIntervals();
+  await flush();
+  await flush();
+  assert.equal(intervals.length, 0, '90s 预算到点必须放弃并停止轮询');
+  assert.equal(modalRoots().length, 0, '预算放弃路径不弹窗（能确定失败的分支 20s 时已说完）');
+  // busy 复位（与失败分支同款：放弃后按钮仍可再次发起）
+  env.fetchCalls.length = 0;
+  const row = env.injected.find((i) => i.slotName === 'settings.general.item');
+  await firstButton(renderDeep(row.factory().render({}))).props.onClick();
+  await flush();
+  let ok2 = null;
+  for (const root of env.modalRoots()) ok2 = findDomButton(root, 'dsrn-confirm-action') || ok2;
+  ok2.__dispatch('click');
+  await flush();
+  assert.ok(env.fetchCalls.some((c) => String(c.url) === '/plugins/dsh-restart-now/restart' && c.init.method === 'POST'),
+    '预算放弃须复位 busy.v：用户还能再次发起');
+});
+
+test('U21z6 close 同款：202 仅关闭后轮询，失败回执弹「关闭已中止：原因」', async () => {
+  const env = load({
+    probeBody: CLOSE_PROBE,
+    closeResponder: () => ({ status: 202, body: { ok: true, mode: 'close' } }),
+  });
+  env.captured.exports.apply(env.ctx, {});
+  await flush();
+  const main = env.injected.find((i) => i.slotName === 'main');
+  const tree = renderDeep(main.factory().render({}));
+  const closeButton = findReactButton(tree, '仅关闭');
+  await closeButton.props.onClick();
+  await flush();
+  const okButton = findDomButton(env.modalRoots()[0], 'dsrn-confirm-action');
+  okButton.__dispatch('click');
+  await flush();
+  assert.ok(env.fetchCalls.some((c) => String(c.url) === '/plugins/dsh-restart-now/close' && c.init.method === 'POST'),
+    '前置：确认后应 POST /close');
+  assert.equal(env.intervals.length, 1, 'close 202 后同样应启动轮询');
+  env.modalRoots().forEach((m) => m.parentNode.removeChild(m));
+  env.envState.body = { ok: true, lastRestart: { status: 'failed', reason: 'main-not-stopped' } };
+  env.clock.advance(21000);
+  env.tickIntervals();
+  await flush();
+  await flush();
+  assert.equal(env.intervals.length, 0, '发现失败后轮询必须停止');
+  assert.equal(env.modalRoots().length, 1, 'close 失败必须弹窗可见');
+  const text = domText(env.modalRoots()[0]).join(' ');
+  assert.ok(text.includes('关闭已中止'), `close 失败话术应为「关闭已中止：原因」，实际：${text.slice(0, 200)}`);
+  assert.ok(text.includes('main-not-stopped'), `弹窗须带失败原因，实际：${text.slice(0, 200)}`);
+});
+
+test('U21z7 等待模式（waiting）不启动停机轮询；非 202 的拒绝路径也不启动', async () => {
+  // waiting 模式有自己的 /status 轮询（waitPoll），终局是一次重启——两种轮询职责不同
+  const waiting = load({
+    probeBody: DESKTOP_PROBE,
+    restartResponder: () => ({ status: 202, body: { ok: true, mode: 'waiting', since: 1, remainingMs: 60000, tasks: 0, jobs: 0 } }),
+  });
+  waiting.captured.exports.apply(waiting.ctx, {});
+  await flush();
+  const row = waiting.injected.find((i) => i.slotName === 'settings.general.item');
+  await firstButton(renderDeep(row.factory().render({}))).props.onClick();
+  await flush();
+  // confirm:true 默认开 → 确认框里点「重启」才真正 POST
+  findDomButton(waiting.modalRoots()[0], 'dsrn-confirm-action').__dispatch('click');
+  await flush();
+  // intervals[0] 就是 waitPoll：等待模式的唯一 interval，拉的是 /status
+  assert.equal(waiting.intervals.length, 1, '等待模式应只有 waitPoll（/status）一个 interval');
+  // 推进一轮：waitPoll 继续拉 /status，绝不出现第二次 GET /environment（停机轮询没被启动）
+  waiting.fetchCalls.length = 0;
+  waiting.clock.advance(2000);
+  waiting.tickIntervals();
+  await flush();
+  assert.equal(waiting.fetchCalls.length, 1, '一个 tick 恰好是 waitPoll 的一次 /status');
+  assert.ok(String(waiting.fetchCalls[0].url).indexOf('/status') !== -1, 'tick 拉的是 /status');
+  assert.ok(String(waiting.fetchCalls[0].url).indexOf('/environment') === -1,
+    '等待模式绝不能启动停机轮询（/environment 只在启动探测时拉一次）');
+
+  // 非 waiting 的 202 才启动轮询；409 拒绝路径绝不能启动
+  const rejected = load({
+    probeBody: DESKTOP_PROBE,
+    restartResponder: () => ({ status: 409, body: { ok: false, reason: 'installing' } }),
+  });
+  rejected.captured.exports.apply(rejected.ctx, {});
+  await flush();
+  const row2 = rejected.injected.find((i) => i.slotName === 'settings.general.item');
+  await firstButton(renderDeep(row2.factory().render({}))).props.onClick();
+  await flush();
+  assert.equal(rejected.intervals.length, 0, '拒绝路径（409）不该有任何轮询');
+});
+
+// —— v1.3.1 标题栏 overlay 按钮（shell.overlay）——
+// 组件恒渲染（宿主探测口没有 windows 标志），显隐交给 html[data-windows-titlebar] CSS；
+// mac 的标题栏菜单是原生系统菜单，overlay 挤位无意义，但那是 CSS 的事。
+
+test('U21aa 标题栏 overlay：shell.overlay 注册、描述符带 id、组件渲染 28x28 图标钮', async () => {
+  const { captured, injected, ctx } = load({ probeBody: DESKTOP_PROBE });
+  captured.exports.apply(ctx, {});
+  await flush();
+
+  const overlay = injected.find((i) => i.slotName === 'shell.overlay');
+  assert.ok(overlay, 'shell.overlay 槽位未注册（v1.3.1 标题栏按钮）');
+  const descriptor = overlay.factory();
+  assert.equal(descriptor.name, 'shell.overlay');
+  assert.equal(descriptor.id, 'dsh-restart-now', 'overlay 描述符必须带 id（与现有入口一致）');
+
+  const tree = renderDeep(descriptor.render({}));
+  assert.ok(tree && typeof tree === 'object', '标题栏组件未返回元素——禁止按平台 return null（显隐交给 CSS）');
+  assert.equal(tree.props.className, 'dsrn-titlebar', '按钮本体 class 须用 .dsrn-titlebar 前缀');
+  assert.equal(typeof tree.props.onClick, 'function', '点击须接处理器（doRestart，带确认弹窗）');
+  assert.equal(tree.props['aria-label'], '重启应用', '图标钮必须有 aria-label（读屏/悬浮提示）');
+  // 子节点只能是图标（span.dsrn-icon 包 svg），不得混入文字
+  const kids = Array.isArray(tree.children) ? tree.children : [];
+  assert.equal(kids.length, 1, '标题栏按钮只应有图标一个子节点');
+  assert.equal(kids[0].props.className, 'dsrn-icon', '子节点必须是 .dsrn-icon 图标座');
+  // CSS 挤位方案（照抄竞品：三重特异性 + 菜单起点右移）
+  assert.ok(source.includes('html[data-windows-titlebar] .dsrn-titlebar{display:inline-flex'),
+    '显隐必须由 html[data-windows-titlebar] 选择器控制（组件恒渲染）');
+  assert.ok(source.includes('html[data-windows-titlebar][data-windows-titlebar][data-windows-titlebar]{--dsh-windows-menu-start:84px}'),
+    '三重特异性压侧栏包 :has() 规则（照抄竞品挤位方案）');
+  assert.ok(source.includes('--dsh-windows-menu-start:120px'), '收起侧栏菜单起点须推到 120px');
+  assert.ok(source.includes('top:calc((var(--dsh-windows-titlebar-height,40px) - 28px)/2)'),
+    '垂直定位照抄竞品（标题栏高缺省 40px 回退）');
+  assert.ok(!/\.dsrn-titlebar\{[^}]*z-index:\s*30/.test(source), '不得照抄竞品 z-index:30（用本项目 ≤10 的层级习惯）');
+});
+
+test('U21ab 标题栏点击走 doRestart（confirm:false 直接 POST /restart）', async () => {
+  const env = load({
+    probeBody: { ...DESKTOP_PROBE, config: { ...DESKTOP_PROBE.config, confirm: false } },
+  });
+  env.captured.exports.apply(env.ctx, {});
+  await flush();
+  const overlay = env.injected.find((i) => i.slotName === 'shell.overlay');
+  const tree = renderDeep(overlay.factory().render({}));
+  env.fetchCalls.length = 0;
+  const button = firstButton(tree);
+  await button.props.onClick();
+  await flush();
+  assert.ok(env.fetchCalls.some((c) => String(c.url) === '/plugins/dsh-restart-now/restart' && c.init.method === 'POST'),
+    '标题栏按钮点击必须触发与其它入口同一条 POST /restart');
+});
+
+test('U21ac entryTitlebar 开关：false 时不注册 overlay，拨开关即时撤/恢复注册并写回配置层', async () => {
+  // ① 配置层 entryTitlebar:false → 挂载即不注册
+  const off = load({
+    probeBody: { ...DESKTOP_PROBE, config: { ...DESKTOP_PROBE.config, entryTitlebar: false } },
+  });
+  off.captured.exports.apply(off.ctx, {});
+  await flush();
+  assert.ok(!off.injected.map((i) => i.slotName).includes('shell.overlay'),
+    'entryTitlebar:false 时 overlay 不得注册');
+
+  // ② 设置页拨开关 → 立即撤注册 + 全量写回 /config（漏键会抹掉用户偏好，落盘是整文件替换）
+  const { captured, ctx, injected, configPosts, resetHooks, takeEffects } = load({ probeBody: DESKTOP_PROBE });
+  captured.exports.apply(ctx, {});
+  await flush();
+  const section = injected.find((i) => i.slotName === 'settings.section');
+  resetHooks();
+  renderDeep(section.factory().render({}));
+  for (const fn of takeEffects()) fn();
+  await flush();
+  await flush();
+  resetHooks();
+  const tree = renderDeep(section.factory().render({}));
+  // 精确匹配「标题栏按钮（编辑旁）」——「会话标题栏按钮」（entryHeader）也含「标题栏按钮」子串
+  const row = findSwitchRow(tree, '标题栏按钮（编辑旁）');
+  assert.ok(row, '设置页须出现「标题栏按钮（编辑旁）」开关行');
+  const sw = firstRoleSwitch(row);
+  assert.equal(sw.props['aria-checked'], true, '默认全开');
+  sw.props.onClick();
+  await flush();
+  const post = configPosts.at(-1);
+  assert.ok(post, '拨动开关须写回配置层');
+  assert.equal(post.body.entryTitlebar, false, 'entryTitlebar 值须落盘');
+  for (const key of ['entryPanel', 'entryFooter', 'entryHeader', 'entrySettingsRow', 'allowRestart', 'confirm', 'exePath', 'platformAuth']) {
+    assert.ok(key in post.body, `写回漏了 ${key}（整文件替换语义，漏键抹偏好）`);
+  }
+  assert.ok(!injected.map((i) => i.slotName).includes('shell.overlay'),
+    '拨关后 overlay 注册须即时撤销');
+  // ③ 再拨回来 → overlay 重新注册（动态恢复）
+  resetHooks();
+  const tree2 = renderDeep(section.factory().render({}));
+  const row2 = findSwitchRow(tree2, '标题栏按钮（编辑旁）');
+  const sw2 = firstRoleSwitch(row2);
+  assert.equal(sw2.props['aria-checked'], false, '状态须反映上次拨动');
+  sw2.props.onClick();
+  await flush();
+  assert.ok(injected.map((i) => i.slotName).includes('shell.overlay'),
+    '重新打开后 overlay 须恢复注册');
 });
 
