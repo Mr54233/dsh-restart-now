@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Restart Now",
-    "description": "One-click restart for DSH Desktop from five entries (sidebar panel, sidebar footer, conversation header, Settings row, /restart), each switchable. Windows and macOS."
+    "description": "Restart or close DSH Desktop with configurable UI entries, task safeguards and preflight diagnostics. Includes a Windows title-bar menu entry."
   }
 }
