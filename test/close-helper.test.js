@@ -33,6 +33,21 @@ for (const platform of ['win32', 'darwin']) {
   });
 }
 
+for (const platform of ['win32', 'darwin']) {
+  test(`非 ASCII 路径可安全嵌入 ${platform} 助手脚本`, () => {
+    const paths = platform === 'win32'
+      ? { exe: 'C:\\用户\\测试 空间\\DeepSeek Harness.exe', errLog: 'C:\\临时\\错误.log', ack: 'C:\\临时\\确认.ack', receipt: 'C:\\用户\\回执.json' }
+      : { exe: '/应用程序/测试 空间/DSH.app/Contents/MacOS/DSH', errLog: '/临时/错误.log', ack: '/临时/确认.ack', receipt: '/用户/回执.json' };
+    for (const action of ['close', 'restart']) {
+      const script = buildHelperScript({ platform, mainPid: 1234, hostPid: 567, ...paths, action });
+      for (const [name, value] of Object.entries({ EXE: paths.exe, ERR_LOG: paths.errLog, ACK: paths.ack, RECEIPT: paths.receipt })) {
+        assert.ok(script.includes(`const ${name} = ${JSON.stringify(value)};`), `${name} 路径必须完整转义并保留`);
+      }
+      assert.doesNotThrow(() => new Function(script), '生成的助手脚本必须能解析');
+    }
+  });
+}
+
 test('U32 close 成功回执经 summarizeReceipt 呈现为 closed（含 host 未退的失败形态）', async () => {
   const { summarizeReceipt } = await import('../lib/receipt.js');
   assert.equal(summarizeReceipt({ action: 'close', closedAt: 't' }).status, 'closed');

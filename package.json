@@ -20,7 +20,7 @@
     "locale/*.json"
   ],
   "scripts": {
-    "test": "node --test test/helper.test.js test/guard.test.js test/environment.test.js test/config-store.test.js test/schema.test.js test/prune.test.js test/probe.test.js test/tasks.test.js test/version.test.js test/receipt.test.js test/dispatch.test.js test/client-smoke.test.js test/cooldown.test.js test/platform-auth.test.js test/mac-helper.test.js"
+    "test": "node --test test/helper.test.js test/guard.test.js test/environment.test.js test/config-store.test.js test/schema.test.js test/prune.test.js test/probe.test.js test/tasks.test.js test/version.test.js test/receipt.test.js test/dispatch.test.js test/client-smoke.test.js test/close-helper.test.js test/cooldown.test.js test/platform-auth.test.js test/mac-helper.test.js"
   },
   "dsh": {
     "bundle": {
