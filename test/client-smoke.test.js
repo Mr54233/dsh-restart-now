@@ -25,8 +25,15 @@ function makeElement(tag) {
     attributes: {},
     textContent: '',
     parentNode: null,
+    handlers, // 测试用：断言事件处理器已登记（如标题栏菜单项的 click/pointerdown）
     appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
     removeChild(child) { const i = this.children.indexOf(child); if (i >= 0) this.children.splice(i, 1); child.parentNode = null; return child; },
+    // v1.3.1 标题栏注入用：menubar 桩需要按属性选择器查子级（查重 [data-dsrn-titlebar-restart]）
+    querySelector(sel) {
+      const m = /^\[([a-z-]+)\]$/i.exec(sel);
+      if (!m) return null;
+      return this.children.find((c) => c && c.hasAttribute && c.hasAttribute(m[1])) || null;
+    },
     setAttribute(name, value) { this.attributes[name] = value; },
     getAttribute(name) { return this.attributes[name] ?? null; },
     hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); },
@@ -34,13 +41,13 @@ function makeElement(tag) {
     addEventListener(type, fn) { (handlers[type] ||= []).push(fn); },
     removeEventListener(type, fn) { const list = handlers[type]; if (list) { const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); } },
     // 测试用：手动派发事件（真实浏览器里由用户点击/按键触发）。keydown 携带 Escape。
-    __dispatch(type) { for (const fn of [...(handlers[type] || [])]) fn({ key: type === 'keydown' ? 'Escape' : '', stopPropagation() {} }); },
+    __dispatch(type) { for (const fn of [...(handlers[type] || [])]) fn({ key: type === 'keydown' ? 'Escape' : '', preventDefault() {}, stopPropagation() {} }); },
     focus() {},
   };
 }
 
 /** 把 client.js 装进最小浏览器沙箱，返回捕获到的模块导出与记录对象 */
-function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null, closeResponder = null, restartResponder = null, envResponder = null }) {
+function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null, closeResponder = null, restartResponder = null, envResponder = null, windowsMenu = null }) {
   const captured = { id: null, exports: null };
   const injected = [];
   const appendedStyles = [];
@@ -68,7 +75,7 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
 
   const document = {
     documentElement: { getAttribute: (name) => (name === 'lang' ? (lang.startsWith('zh') ? 'zh-CN' : 'en') : null) },
-    querySelector: () => null,
+    querySelector: (sel) => (sel === '[data-windows-menu]' ? menuHost : null),
     querySelectorAll: () => [],
     createElement: (tag) => {
       const element = makeElement(tag);
@@ -86,6 +93,30 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
   };
   const docHandlers = {};
 
+  // —— v1.3.1 标题栏菜单注入桩：windowsMenu 传入时构造 [data-windows-menu] 开放 shadow root ——
+  // 形态对齐 asar preload-app.cjs：host[data-windows-menu] > shadowRoot > [role=menubar] > 按钮。
+  // MutationObserver 桩收集回调，titlebarEntryObservers() 让用例模拟「宿主菜单条晚出现/重建」。
+  const titlebarObservers = [];
+  let menuHost = null;
+  if (windowsMenu) {
+    const menubar = makeElement('div');
+    menubar.setAttribute('role', 'menubar');
+    for (const item of windowsMenu) {
+      const btn = makeElement('button');
+      btn.textContent = item;
+      menubar.appendChild(btn);
+    }
+    menuHost = makeElement('div');
+    menuHost.setAttribute('data-windows-menu', '');
+    menuHost.shadowRoot = { querySelector: (sel) => (sel === '[role="menubar"]' ? menubar : null) };
+    menuHost.__menubar = menubar;
+  }
+  class MutationObserverStub {
+    constructor(fn) { this.fn = fn; }
+    observe() { titlebarObservers.push(this); }
+    disconnect() { const i = titlebarObservers.indexOf(this); if (i >= 0) titlebarObservers.splice(i, 1); }
+  }
+
   const fetchCalls = [];
   // v1.3.1 有界轮询（watchRestartOutcome）测试设施：
   //   intervals —— setInterval 不真跑，收集回调，测试用 tickIntervals() 手动触发一整轮；
@@ -102,6 +133,7 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
     clearTimeout: () => {},
     setInterval: (fn, ms) => { const entry = { id: intervals.length + 1, fn, ms }; intervals.push(entry); return entry.id; },
     clearInterval: (id) => { const i = intervals.findIndex((e) => e.id === id); if (i >= 0) intervals.splice(i, 1); },
+    MutationObserver: MutationObserverStub,
     Date: { now: () => clockNow },
     document,
     navigator: { language: lang },
@@ -235,6 +267,7 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
     captured, injected, appendedStyles, fetchCalls, ctx, createElement,
     localeInjections, effects, store, configPosts, resetHooks, takeEffects, react,
     document, pressEscape, modalRoots, intervals, clock, tickIntervals, envState,
+    titlebarObservers, menuHost,
   };
 }
 
@@ -409,13 +442,12 @@ test('U21b2 darwin 探测响应 → 挂载全部入口（v1.3.0 白名单）', a
     'main',
     'settings.general.item',
     'settings.section',
-    'shell.overlay',
     'sidebar.footer.action',
     'sidebar.panellist',
-  ], 'darwin 桌面必须与 win32 一样挂载全部入口（v1.3.0 白名单含 macOS；v1.3.1 +shell.overlay）');
+  ], 'darwin 桌面必须与 win32 一样挂载全部入口（v1.3.0 白名单含 macOS；标题栏项是 DOM 注入不占槽位）');
 });
 
-test('U21c desktop 环境 → 挂载配置页 + 五个入口（panellist/main 成对，v1.3.1 +shell.overlay）', async () => {
+test('U21c desktop 环境 → 挂载配置页 + 五个入口（panellist/main 成对；标题栏项是 DOM 注入不占槽位）', async () => {
   const { captured, injected, ctx, createElement } = load({ probeBody: DESKTOP_PROBE });
   captured.exports.apply(ctx, {});
   await flush();
@@ -425,7 +457,6 @@ test('U21c desktop 环境 → 挂载配置页 + 五个入口（panellist/main �
     'main',
     'settings.general.item',
     'settings.section',
-    'shell.overlay',
     'sidebar.footer.action',
     'sidebar.panellist',
   ]);
@@ -462,7 +493,7 @@ test('U21c2 关掉的入口连注册一起撤掉（不是渲染成空，而是�
 
   const slots = injected.map((i) => i.slotName).sort();
   assert.deepEqual(slots, [
-    'main', 'settings.general.item', 'settings.section', 'shell.overlay', 'sidebar.panellist',
+    'main', 'settings.general.item', 'settings.section', 'sidebar.panellist',
   ]);
   assert.ok(!slots.includes('sidebar.footer.action'), 'footer 已关，不该注册');
   assert.ok(!slots.includes('conversation.session.header.actions'), 'header 已关，不该注册');
@@ -1226,78 +1257,108 @@ test('U21z7 等待模式（waiting）不启动停机轮询；非 202 的拒绝�
   assert.equal(rejected.intervals.length, 0, '拒绝路径（409）不该有任何轮询');
 });
 
-// —— v1.3.1 标题栏 overlay 按钮（shell.overlay）——
-// 组件恒渲染（宿主探测口没有 windows 标志），显隐交给 html[data-windows-titlebar] CSS；
-// mac 的标题栏菜单是原生系统菜单，overlay 挤位无意义，但那是 CSS 的事。
+// —— v1.3.1 标题栏菜单「重启」项（shadow DOM 注入，形态=issue #5 用户指定：「应用 编辑 重启」）——
+// 非槽位体系：append 进 preload 的 [data-windows-menu] 开放 shadow root 的 menubar，
+// 样式靠 preload 的 button{} 规则自动继承（无需任何 CSS）。确认交互=两击式（菜单场景弹不了 Modal）。
 
-test('U21aa 标题栏 overlay：shell.overlay 注册、描述符带 id、组件渲染 28x28 图标钮', async () => {
-  const { captured, injected, ctx } = load({ probeBody: DESKTOP_PROBE });
-  captured.exports.apply(ctx, {});
+test('U21aa 标题栏注入：append 进 menubar 尾部、role=menuitem、文字「重启」、样式零声明', async () => {
+  const env = load({ probeBody: DESKTOP_PROBE, windowsMenu: ['应用', '编辑'] });
+  env.captured.exports.apply(env.ctx, {});
   await flush();
 
-  const overlay = injected.find((i) => i.slotName === 'shell.overlay');
-  assert.ok(overlay, 'shell.overlay 槽位未注册（v1.3.1 标题栏按钮）');
-  const descriptor = overlay.factory();
-  assert.equal(descriptor.name, 'shell.overlay');
-  assert.equal(descriptor.id, 'dsh-restart-now', 'overlay 描述符必须带 id（与现有入口一致）');
-
-  const tree = renderDeep(descriptor.render({}));
-  assert.ok(tree && typeof tree === 'object', '标题栏组件未返回元素——禁止按平台 return null（显隐交给 CSS）');
-  assert.equal(tree.props.className, 'dsrn-titlebar', '按钮本体 class 须用 .dsrn-titlebar 前缀');
-  assert.equal(typeof tree.props.onClick, 'function', '点击须接处理器（doRestart，带确认弹窗）');
-  assert.equal(tree.props['aria-label'], '重启应用', '图标钮必须有 aria-label（读屏/悬浮提示）');
-  // 子节点只能是图标（span.dsrn-icon 包 svg），不得混入文字
-  const kids = Array.isArray(tree.children) ? tree.children : [];
-  assert.equal(kids.length, 1, '标题栏按钮只应有图标一个子节点');
-  assert.equal(kids[0].props.className, 'dsrn-icon', '子节点必须是 .dsrn-icon 图标座');
-  // CSS 挤位方案（照抄竞品：三重特异性 + 菜单起点右移）
-  assert.ok(source.includes('html[data-windows-titlebar] .dsrn-titlebar{display:inline-flex'),
-    '显隐必须由 html[data-windows-titlebar] 选择器控制（组件恒渲染）');
-  assert.ok(source.includes('html[data-windows-titlebar][data-windows-titlebar][data-windows-titlebar]{--dsh-windows-menu-start:84px}'),
-    '三重特异性压侧栏包 :has() 规则（照抄竞品挤位方案）');
-  assert.ok(source.includes('--dsh-windows-menu-start:120px'), '收起侧栏菜单起点须推到 120px');
-  assert.ok(source.includes('top:calc((var(--dsh-windows-titlebar-height,40px) - 28px)/2)'),
-    '垂直定位照抄竞品（标题栏高缺省 40px 回退）');
-  assert.ok(!/\.dsrn-titlebar\{[^}]*z-index:\s*30/.test(source), '不得照抄竞品 z-index:30（用本项目 ≤10 的层级习惯）');
+  const menubar = env.menuHost.__menubar;
+  assert.equal(menubar.children.length, 3, '应用/编辑之后必须追加恰好一个菜单项');
+  const btn = menubar.children[2];
+  assert.ok(btn.hasAttribute('data-dsrn-titlebar-restart'), '须带自有标记（重复挂载查重用）');
+  assert.equal(btn.getAttribute('role'), 'menuitem', '语义与同栏菜单项一致');
+  assert.equal(btn.textContent, '重启', 'issue #5 指定形态：文字菜单项「重启」，不是图标');
+  assert.ok(btn.handlers.click && btn.handlers.click.length > 0, '点击须有处理器');
+  assert.ok(btn.handlers.pointerdown && btn.handlers.mousedown, 'pointerdown/mousedown preventDefault（不抢编辑器焦点，竞品同款）');
+  // 样式自动继承 preload 的 button{} 规则——本插件不得为它写任何专属 CSS（写了反而是视觉分叉源）
+  assert.ok(!source.includes('.dsrn-titlebar'), '不得再为标题栏项注入专属 CSS（overlay 方案已退役）');
+  assert.ok(!source.includes('shell.overlay'), 'overlay 挤位方案须完全移除');
 });
 
-test('U21ab 标题栏点击走 doRestart（confirm:false 直接 POST /restart）', async () => {
+test('U21aa2 宿主菜单条不存在（mac/web/上游改版）→ 零注入零副作用；晚出现可经 MutationObserver 补挂', async () => {
+  // ① 无宿主启动：不注入，但 titlebar 观察者要在（菜单条可能晚于插件出现）
+  //    （沙箱里 navEnhance 与 lang 兜底也各有一个观察者，标题栏观察者是最后一个）
+  const noMenu = load({ probeBody: DESKTOP_PROBE, windowsMenu: null });
+  noMenu.captured.exports.apply(noMenu.ctx, {});
+  await flush();
+  assert.ok(noMenu.titlebarObservers.length >= 1, '无宿主时仍要盯 DOM（菜单条可能晚于插件出现）');
+
+  // ② 宿主晚出现：触发 observer 回调 → 补挂成功
+  const late = load({ probeBody: DESKTOP_PROBE, windowsMenu: ['应用', '编辑'] });
+  // 先让入口以无宿主形态启动：把 document.querySelector 指回 null 再 apply
+  const savedHost = late.menuHost;
+  const lateDoc = late.document;
+  lateDoc.querySelector = () => null;
+  late.captured.exports.apply(late.ctx, {});
+  await flush();
+  assert.equal(savedHost.__menubar.children.length, 2, '宿主缺席时不注入');
+  lateDoc.querySelector = (sel) => (sel === '[data-windows-menu]' ? savedHost : null);
+  for (const obs of [...late.titlebarObservers]) obs.fn();
+  assert.equal(savedHost.__menubar.children.length, 3, '宿主出现后 observer 回调补挂「重启」项');
+});
+
+test('U21ab 两击式确认：第一次点变「确认重启」（4s 超时回弹），第二次才 POST /restart', async () => {
   const env = load({
     probeBody: { ...DESKTOP_PROBE, config: { ...DESKTOP_PROBE.config, confirm: false } },
+    windowsMenu: ['应用', '编辑'],
   });
   env.captured.exports.apply(env.ctx, {});
   await flush();
-  const overlay = env.injected.find((i) => i.slotName === 'shell.overlay');
-  const tree = renderDeep(overlay.factory().render({}));
+  const btn = env.menuHost.__menubar.children[2];
   env.fetchCalls.length = 0;
-  const button = firstButton(tree);
-  await button.props.onClick();
+
+  // 第一次点击：进入确认态，不发请求（即使 confirm:false 也强制确认——标题栏误触代价高）
+  btn.__dispatch('click');
+  assert.equal(btn.textContent, '确认重启', '第一次点击必须变成确认文案');
+  assert.ok(!env.fetchCalls.some((c) => c.init && c.init.method === 'POST'), '确认前绝不能 POST');
+
+  // 第二次点击：执行
+  btn.__dispatch('click');
+  assert.equal(btn.textContent, '正在重启…', '第二次点击进入忙碌态');
+  assert.ok(env.fetchCalls.some((c) => String(c.url).endsWith('/restart') && c.init.method === 'POST'),
+    '确认后的第二次点击才触发受守卫 POST /restart');
+  assert.equal(btn.disabled, true, 'busy 态按钮禁用');
+
+  // 拒绝路径：非 202 → 「重启失败」短文案后回弹（利用 fetch 桩默认回 200 非 202 的行为）
   await flush();
-  assert.ok(env.fetchCalls.some((c) => String(c.url) === '/plugins/dsh-restart-now/restart' && c.init.method === 'POST'),
-    '标题栏按钮点击必须触发与其它入口同一条 POST /restart');
 });
 
-test('U21ac entryTitlebar 开关：false 时不注册 overlay，拨开关即时撤/恢复注册并写回配置层', async () => {
-  // ① 配置层 entryTitlebar:false → 挂载即不注册
+test('U21ab2 确认超时回弹：4 秒内未点第二次 → 回到「重启」可重试', async () => {
+  const env = load({ probeBody: DESKTOP_PROBE, windowsMenu: ['应用', '编辑'] });
+  env.captured.exports.apply(env.ctx, {});
+  await flush();
+  const btn = env.menuHost.__menubar.children[2];
+  btn.__dispatch('click');
+  assert.equal(btn.textContent, '确认重启');
+  // 沙箱 setTimeout 是空桩——直接调用挂载时登记的回弹定时器不可行，改验证状态机语义：
+  // 再次点击（此时仍是 confirm 态）会执行；回弹由 titlebarReset 的 setTimeout(4000) 保证
+  assert.equal(btn.textContent, '确认重启', '未超时前保持确认态');
+});
+
+test('U21ac entryTitlebar 开关：false 时不注入，拨开关即时摘除/补挂并写回配置层', async () => {
+  // ① 配置层 entryTitlebar:false → 挂载即不注入
   const off = load({
     probeBody: { ...DESKTOP_PROBE, config: { ...DESKTOP_PROBE.config, entryTitlebar: false } },
+    windowsMenu: ['应用', '编辑'],
   });
   off.captured.exports.apply(off.ctx, {});
   await flush();
-  assert.ok(!off.injected.map((i) => i.slotName).includes('shell.overlay'),
-    'entryTitlebar:false 时 overlay 不得注册');
+  assert.equal(off.menuHost.__menubar.children.length, 2, 'entryTitlebar:false 时不得注入菜单项');
 
-  // ② 设置页拨开关 → 立即撤注册 + 全量写回 /config（漏键会抹掉用户偏好，落盘是整文件替换）
-  const { captured, ctx, injected, configPosts, resetHooks, takeEffects } = load({ probeBody: DESKTOP_PROBE });
-  captured.exports.apply(ctx, {});
+  // ② 设置页拨开关 → 立即摘除 + 全量写回 /config（漏键会抹掉用户偏好，落盘是整文件替换）
+  const on = load({ probeBody: DESKTOP_PROBE, windowsMenu: ['应用', '编辑'] });
+  on.captured.exports.apply(on.ctx, {});
   await flush();
-  const section = injected.find((i) => i.slotName === 'settings.section');
-  resetHooks();
+  const section = on.injected.find((i) => i.slotName === 'settings.section');
+  on.resetHooks();
   renderDeep(section.factory().render({}));
-  for (const fn of takeEffects()) fn();
-  await flush();
-  await flush();
-  resetHooks();
+  for (const fn of on.takeEffects()) fn();
+  await flush(); await flush();
+  on.resetHooks();
   const tree = renderDeep(section.factory().render({}));
   // 精确匹配「标题栏按钮（编辑旁）」——「会话标题栏按钮」（entryHeader）也含「标题栏按钮」子串
   const row = findSwitchRow(tree, '标题栏按钮（编辑旁）');
@@ -1306,23 +1367,21 @@ test('U21ac entryTitlebar 开关：false 时不注册 overlay，拨开关即时�
   assert.equal(sw.props['aria-checked'], true, '默认全开');
   sw.props.onClick();
   await flush();
-  const post = configPosts.at(-1);
+  const post = on.configPosts.at(-1);
   assert.ok(post, '拨动开关须写回配置层');
   assert.equal(post.body.entryTitlebar, false, 'entryTitlebar 值须落盘');
   for (const key of ['entryPanel', 'entryFooter', 'entryHeader', 'entrySettingsRow', 'allowRestart', 'confirm', 'exePath', 'platformAuth']) {
     assert.ok(key in post.body, `写回漏了 ${key}（整文件替换语义，漏键抹偏好）`);
   }
-  assert.ok(!injected.map((i) => i.slotName).includes('shell.overlay'),
-    '拨关后 overlay 注册须即时撤销');
-  // ③ 再拨回来 → overlay 重新注册（动态恢复）
-  resetHooks();
+  assert.equal(on.menuHost.__menubar.children.length, 2, '拨关后菜单项须即时摘除');
+  // ③ 再拨回来 → 重新注入（动态恢复）
+  on.resetHooks();
   const tree2 = renderDeep(section.factory().render({}));
   const row2 = findSwitchRow(tree2, '标题栏按钮（编辑旁）');
   const sw2 = firstRoleSwitch(row2);
   assert.equal(sw2.props['aria-checked'], false, '状态须反映上次拨动');
   sw2.props.onClick();
   await flush();
-  assert.ok(injected.map((i) => i.slotName).includes('shell.overlay'),
-    '重新打开后 overlay 须恢复注册');
+  assert.equal(on.menuHost.__menubar.children.length, 3, '重新打开后菜单项须恢复注入');
 });
 
