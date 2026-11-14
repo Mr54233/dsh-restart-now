@@ -169,21 +169,19 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
       // v1.3.1 仅关闭：POST /close 的可编程响应（closeResponder 返回 {status, body}）。
       // 未提供时与其它请求一样回 probeBody（status 200 → postClose 走 rejected 兜底分支）。
       if (method === 'POST' && closeResponder && String(url).indexOf('/plugins/dsh-restart-now/close') !== -1) {
-        const out = closeResponder(String(url), init) || {};
-        return Promise.resolve({
-          ok: Number(out.status) < 400,
-          status: Number(out.status) || 200,
-          json: () => Promise.resolve(out.body || {}),
+        return Promise.resolve().then(() => closeResponder(String(url), init)).then((value) => {
+          const out = value || {};
+          return { ok: Number(out.status) < 400, status: Number(out.status) || 200,
+            json: () => Promise.resolve(out.body || {}) };
         });
       }
       // v1.3.1 有界轮询：POST /restart 的可编程响应（restartResponder 返回 {status, body}），
       // 202 派发成功路径必须 202 才会启动轮询；未提供时回 probeBody（status 200 → rejected 分支）。
       if (method === 'POST' && restartResponder && String(url).indexOf('/plugins/dsh-restart-now/restart') !== -1) {
-        const out = restartResponder(String(url), init) || {};
-        return Promise.resolve({
-          ok: Number(out.status) < 400,
-          status: Number(out.status) || 200,
-          json: () => Promise.resolve(out.body || {}),
+        return Promise.resolve().then(() => restartResponder(String(url), init)).then((value) => {
+          const out = value || {};
+          return { ok: Number(out.status) < 400, status: Number(out.status) || 200,
+            json: () => Promise.resolve(out.body || {}) };
         });
       }
       // v1.3.1 有界轮询：GET /environment 的可编程响应（启动探测与轮询共用同一路径）。
@@ -1120,7 +1118,7 @@ test('U21y 仅关闭契约（源码级）：端点/能力位/确认文案/忙碌
   assert.ok(source.includes('closeSupported'), '须消费探测口 closeSupported 能力位');
   assert.ok(source.includes('不会自动重启'), '中文确认文案须明确不会自动重启');
   assert.ok(source.includes('does not relaunch'), '英文确认文案须明确不会重启');
-  assert.ok(source.includes("fetch(CLOSE + (query || '')"), '关闭请求必须发往 CLOSE 端点');
+  assert.match(source, /(?:fetch|timedFetch)\(CLOSE \+ \(query \|\| ''\)/, '关闭请求必须发往 CLOSE 端点');
   assert.ok(source.includes("postClose('?force=1')"), 'busy 强制路必须带 ?force=1');
   assert.ok(source.includes('close-helper-missing'), '须识别宿主 501（助手未实现 close 的兜底话术）');
   assert.ok(source.includes('function askCloseBusy'), 'close 须有专属忙碌框');
@@ -1220,7 +1218,7 @@ test('U21z3 回执一直无 failed（unconfirmed）→「重启似乎没有生�
   assert.ok(text.includes('重启似乎没有生效'), `应弹「重启似乎没有生效：应用仍在运行」，实际：${text.slice(0, 200)}`);
 });
 
-test('U21z4 fetch 抛错（服务没了 = 正常停机进行中）→ 静默停止轮询，绝不弹窗', async () => {
+test('U21z4 轮询网络错误不证明停机成功，保持 loading 并继续轮询', async () => {
   const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
   const { intervals, modalRoots, clock, tickIntervals } = env;
   modalRoots().forEach((m) => m.parentNode.removeChild(m));
@@ -1229,11 +1227,11 @@ test('U21z4 fetch 抛错（服务没了 = 正常停机进行中）→ 静默停�
   tickIntervals();
   await flush();
   await flush();
-  assert.equal(intervals.length, 0, '服务没了（正常停机）轮询应停止');
-  assert.equal(modalRoots().length, 0, '正常停机路径必须静默（窗口马上要关）');
+  assert.equal(intervals.length, 1, '网络错误不能证明成功，应继续等待有界轮询');
+  assert.equal(modalRoots().length, 0, '网络暂断时不应立即判定失败');
 });
 
-test('U21z5 90s 总预算到点放弃：轮询停止、不弹窗、busy 复位', async () => {
+test('U21z5 90s 总预算到点放弃：轮询停止、提示未生效、busy 复位', async () => {
   // lastRestart.status:'pending' 不满足任何结论分支（failed/ok/closed/unconfirmed 都不是）
   // → 只有预算判据能结束轮询，正好单独验证 90s 总预算分支
   const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
@@ -1245,7 +1243,8 @@ test('U21z5 90s 总预算到点放弃：轮询停止、不弹窗、busy 复位',
   await flush();
   await flush();
   assert.equal(intervals.length, 0, '90s 预算到点必须放弃并停止轮询');
-  assert.equal(modalRoots().length, 0, '预算放弃路径不弹窗（能确定失败的分支 20s 时已说完）');
+  assert.equal(modalRoots().length, 1, '预算耗尽须告知用户尚未确认停机');
+  assert.match(domText(modalRoots()[0]).join(' '), /重启似乎没有生效|请求结果未确认/);
   // busy 复位（与失败分支同款：放弃后按钮仍可再次发起）
   env.fetchCalls.length = 0;
   const row = env.injected.find((i) => i.slotName === 'settings.general.item');
@@ -1467,5 +1466,118 @@ test('U21ac entryTitlebar 开关：false 时不注入，拨开关即时摘除/�
   sw2.props.onClick();
   await flush();
   assert.equal(on.menuHost.__menubar.children.length, 3, '重新打开后菜单项须恢复注入');
+});
+
+// 所有动作请求都在 VM 内由可控 Promise 模拟，绝不触及真实服务。
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+function slotButton(app, slot, needle, props = {}) {
+  app.resetHooks();
+  const descriptor = app.injected.find((i) => i.slotName === slot).factory();
+  const tree = renderDeep(descriptor.render(props));
+  return needle ? findReactButton(tree, needle) : firstButton(tree);
+}
+function actionPosts(app) {
+  return app.fetchCalls.filter((c) => c.init?.method === 'POST' && /\/(restart|close)(\?|$)/.test(c.url));
+}
+const NO_CONFIRM_CLOSE = { ...CLOSE_PROBE, config: { ...CLOSE_PROBE.config, confirm: false } };
+
+ test('在途重启跨入口互斥，202 后继续显示 loading，失败回执恢复标题栏', async () => {
+  const pending = deferred();
+  const app = load({ probeBody: NO_CONFIRM_CLOSE, windowsMenu: ['应用', '编辑'], restartResponder: () => pending.promise });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  const row = slotButton(app, 'settings.general.item');
+  const header = slotButton(app, 'conversation.session.header.actions');
+  const title = app.menuHost.__menubar.children[2];
+  row.props.onClick();
+  assert.equal(actionPosts(app).length, 1);
+  assert.equal(title.disabled, true);
+  assert.match(title.textContent, /正在重启/);
+  const busyRow = slotButton(app, 'settings.general.item');
+  assert.equal(busyRow.props.disabled, true);
+  assert.match(textOf(busyRow).join(' '), /正在重启/);
+  header.props.onClick(); title.__dispatch('click');
+  assert.equal(actionPosts(app).length, 1, '旧闭包及标题栏不得绕过全局互斥');
+  pending.resolve({ status: 202, body: { ok: true, mode: 'now' } });
+  await flush();
+  assert.equal(title.disabled, true, '202 仅表示已派发，不是完成');
+  assert.match(textOf(slotButton(app, 'settings.general.item')).join(' '), /正在重启/);
+  app.envState.body = { ok: true, lastRestart: { status: 'failed', reason: 'test-failure' } };
+  app.clock.advance(21000); app.tickIntervals(); await flush();
+  assert.equal(title.disabled, false);
+  assert.equal(title.textContent, '重启');
+  assert.equal(slotButton(app, 'settings.general.item').props.disabled, false);
+  assert.match(domText(app.modalRoots()[0]).join(' '), /test-failure/);
+});
+
+test('仅关闭在途与 202 期间所有入口显示关闭中且互斥', async () => {
+  const pending = deferred();
+  const app = load({ probeBody: NO_CONFIRM_CLOSE, windowsMenu: ['应用', '编辑'], closeResponder: () => pending.promise });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  const close = slotButton(app, 'main', '仅关闭');
+  const row = slotButton(app, 'settings.general.item');
+  close.props.onClick();
+  findDomButton(app.modalRoots()[0], 'dsrn-confirm-action').__dispatch('click');
+  assert.equal(actionPosts(app).length, 1);
+  const title = app.menuHost.__menubar.children[2];
+  assert.equal(title.disabled, true);
+  assert.match(title.textContent, /关闭/);
+  const busyRow = slotButton(app, 'settings.general.item');
+  assert.equal(busyRow.props.disabled, true);
+  assert.match(textOf(busyRow).join(' '), /关闭/);
+  row.props.onClick(); title.__dispatch('click');
+  assert.equal(actionPosts(app).length, 1);
+  pending.resolve({ status: 202, body: { ok: true, mode: 'close' } }); await flush();
+  assert.equal(title.disabled, true);
+  assert.match(title.textContent, /关闭/);
+  app.envState.body = { ok: true, lastRestart: { status: 'failed', reason: 'close-failure' } };
+  app.clock.advance(21000); app.tickIntervals(); await flush();
+  assert.equal(title.disabled, false);
+  assert.equal(title.textContent, '重启');
+});
+
+test('请求拒绝及网络错误均释放 loading、恢复标题栏并允许重试', async () => {
+  for (const failure of ['http', 'network']) {
+    const pending = deferred();
+    let calls = 0;
+    const app = load({ probeBody: NO_CONFIRM_CLOSE, windowsMenu: ['应用', '编辑'], restartResponder: () => { calls++; return calls === 1 ? pending.promise : { status: 403, body: { reason: 'forbidden' } }; } });
+    app.captured.exports.apply(app.ctx, {}); await flush();
+    const title = app.menuHost.__menubar.children[2];
+    title.__dispatch('click');
+    assert.equal(title.disabled, true);
+    if (failure === 'http') pending.resolve({ status: 403, body: { reason: 'forbidden' } });
+    else pending.reject(new Error('simulated network failure'));
+    await flush();
+    assert.equal(title.disabled, false, failure);
+    assert.equal(title.textContent, '重启', failure);
+    assert.equal(slotButton(app, 'settings.general.item').props.disabled, false, failure);
+    assert.equal(app.modalRoots().length, 1, `${failure} 应有可见错误`);
+    if (failure === 'network') {
+      const message = domText(app.modalRoots()[0]).join(' ');
+      assert.match(message, /结果未确认/);
+      assert.doesNotMatch(message, /重启成功|关闭成功/);
+    }
+    title.__dispatch('click'); await flush();
+    assert.equal(actionPosts(app).length, 2, `${failure} 后可重试`);
+  }
+});
+
+test('waiting 响应不永久占用 loading，入口可撤销等待', async () => {
+  const cancel = deferred();
+  const app = load({ probeBody: NO_CONFIRM_CLOSE, windowsMenu: ['应用', '编辑'], restartResponder: (url) => url.includes('cancel=1') ? cancel.promise : { status: 202, body: { ok: true, mode: 'waiting', remainingMs: 60000 } } });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  slotButton(app, 'settings.general.item').props.onClick(); await flush();
+  const title = app.menuHost.__menubar.children[2];
+  assert.equal(title.disabled, false);
+  assert.match(title.textContent, /撤销等待/);
+  title.__dispatch('click');
+  assert.ok(actionPosts(app).some((c) => c.url.endsWith('?cancel=1')));
+  assert.equal(title.disabled, true, '撤销请求在途仍防止重复');
+  cancel.resolve({ status: 200, body: { ok: true, cancelled: true } }); await flush();
+  assert.equal(title.disabled, false);
+  assert.equal(title.textContent, '重启');
 });
 
