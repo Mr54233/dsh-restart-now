@@ -47,7 +47,7 @@ function makeElement(tag) {
 }
 
 /** 把 client.js 装进最小浏览器沙箱，返回捕获到的模块导出与记录对象 */
-function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configGetBody = null, closeResponder = null, restartResponder = null, envResponder = null, windowsMenu = null, preflightResponder = null }) {
+function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, configPostFail = false, configPostResponder = null, configGetBody = null, closeResponder = null, restartResponder = null, envResponder = null, windowsMenu = null, preflightResponder = null, toast = toastStubRef.value }) {
   const captured = { id: null, exports: null };
   const injected = [];
   const appendedStyles = [];
@@ -60,15 +60,16 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
 
   // —— 迷你 hooks：让 useState/useEffect 真的能跑、能触发重渲染 ——
   // 只支持「一个组件实例」的场景（本文件每次渲染一个组件），足够覆盖设置页的异步加载路径。
-  const hookState = [];
+  let hookState = [];
   let hookIdx = 0;
   let pendingEffects = [];
   const react = {
     createElement,
     useState(initial) {
       const i = hookIdx++;
-      if (!(i in hookState)) hookState[i] = initial;
-      return [hookState[i], (value) => { hookState[i] = typeof value === 'function' ? value(hookState[i]) : value; }];
+      const state = hookState;
+      if (!(i in state)) state[i] = initial;
+      return [state[i], (value) => { state[i] = typeof value === 'function' ? value(state[i]) : value; }];
     },
     useEffect(fn) { pendingEffects.push(fn); },
   };
@@ -143,9 +144,10 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
       // POST /config：v1.2.2 入口开关的落盘通道（configPostFail=true 模拟配置文件只读）
       if (method === 'POST' && String(url).endsWith('/config')) {
         configPosts.push({ url, init, body: JSON.parse((init && init.body) || '{}') });
+        if (configPostResponder) return configPostResponder(configPosts.at(-1).body);
         if (configPostFail) {
           return Promise.resolve({
-            ok: false, status: 500,
+            ok: false, status: 400,
             json: () => Promise.resolve({ ok: false, reason: 'config-write-failed' }),
           });
         }
@@ -221,8 +223,22 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
         load(descriptor) {
           captured.id = descriptor.id;
           captured.exports = descriptor.factory((name) => {
-            if (name !== 'react') throw new Error('unexpected require: ' + name);
-            return react;
+            if (name === 'react') return react;
+            // v1.4.0：官方 primitives（Button/Toast 等可选依赖）在真机 require 表里存在；
+            // 沙箱给最小桩：Button/Toast 是函数、IconWarningOutlineRegular 是占位元素，
+            // 其余名字（Switch/fields…）本测试未断言，给 undefined 即可。
+            if (name === '@deepseek-ai/dsh-client-ui-primitives') {
+              // v1.4.0：官方 primitives（Button/Toast 等可选依赖）在真机 require 表里存在。
+              // 桩策略：Button 保持「不可用」语义（() => undefined 且 falsy → OfficialButton=null，
+              // 走本插件自绘按钮路径，与此前全部既有用例的断言形态一致）；
+              // Toast 是本提交的断言对象，必须可识别 → toastStub 闭包引用（见 collectToasts）。
+              return {
+                Button: undefined,
+                Toast: toast,
+                IconWarningOutlineRegular: () => null,
+              };
+            }
+            throw new Error('unexpected require: ' + name);
           });
         },
       },
@@ -272,6 +288,7 @@ function load({ probeBody, lang = 'zh-CN', locale = null, entries = null, config
   return {
     captured, injected, appendedStyles, fetchCalls, ctx, createElement,
     localeInjections, effects, store, configPosts, resetHooks, takeEffects, react,
+    remountHooks: () => { hookState = []; resetHooks(); },
     document, pressEscape, modalRoots, intervals, clock, tickIntervals, envState,
     titlebarObservers, menuHost,
   };
@@ -554,7 +571,6 @@ test('U21c6 v1.2.1 平台鉴权：请求必须带 cookie，且配置页有逃生
     '不得省略凭据：启用平台鉴权后界面操作会全部 401');
   assert.match(source, /credentials:\s*'same-origin'/, '同源请求须携带平台会话 cookie');
   assert.ok(source.includes("key: 'platformAuth'"), '配置页须有平台鉴权开关（逃生门）');
-  assert.ok(source.includes('platformAuth: next.platformAuth !== false'), '实时保存须写回平台鉴权键');
   assert.ok(source.includes('platformAuth: base.platformAuth !== false'),
     '入口开关写回时也须保留平台鉴权键（否则写丢后自动关闭鉴权）');
   assert.ok(source.includes('res.status === 401'), '界面须单独识别 401（与 403 文案分开）');
@@ -1567,9 +1583,9 @@ test('U21ad 实时保存：拨 allowRestart/confirm/platformAuth 立即 POST /co
     const sw = firstRoleSwitch(row);
     assert.equal(sw.props['aria-checked'], true, `第 ${index + 1} 次拨动前「${item.label}」应为开`);
     sw.props.onClick();
-    // 「拨动即写回」：onClick 同步发出 POST，不经过任何去抖/保存按钮
-    assert.equal(app.configPosts.length, index + 1, `拨动「${item.label}」须立即产生第 ${index + 1} 次 POST /config`);
+    // 串行队列在微任务中启动请求，不经过保存按钮。
     await flush();
+    assert.equal(app.configPosts.length, index + 1, `拨动「${item.label}」须产生第 ${index + 1} 次 POST /config`);
     const post = app.configPosts[index];
     assert.equal(post.body[item.key], false, `${item.key} 拨关后的新值须落盘`);
     assert.deepEqual(Object.keys(post.body).sort(), [...PERSIST_KEYS].sort(),
@@ -1634,8 +1650,9 @@ test('U21af 实时保存：exePath 打字只改本地不发请求，onBlur 才�
   }
 
   // 失焦才写回：一次 onBlur 恰好一次 POST，body 带输入框现值且仍是全量键
-  input.props.onBlur();
-  assert.equal(app.configPosts.length, 1, 'onBlur 须立即写回 /config');
+  input.props.onBlur({ target: { value: input.props.value } });
+  await flush();
+  assert.equal(app.configPosts.length, 1, 'onBlur 须写回 /config');
   assert.equal(app.fetchCalls.length, trafficBefore + 1, 'onBlur 恰好多一次请求');
   assert.equal(app.configPosts[0].body.exePath, 'D:\\Tools\\MyApp.exe',
     '失焦写回的是输入框现值（非推导路径，不得被清成 \'\'）');
@@ -1644,7 +1661,26 @@ test('U21af 实时保存：exePath 打字只改本地不发请求，onBlur 才�
   await flush();
 });
 
-test('U21ag 实时保存：写回失败 → 红字提示（带原因），再次拨动开关会重新 POST', async () => {
+// 官方 Toast 是 React 元素（随设置页组件树渲染），不是命令式 DOM：重渲染设置页树，
+// 找 type 为 Toast 桩的元素断言 props。toastStubRef 让 load() 的 require 桩与这里共享同一函数引用。
+const toastStubRef = { value: null };
+const toastStub = () => null;
+toastStubRef.value = toastStub;
+function collectToasts(app, descriptor) {
+  app.resetHooks();
+  const tree = renderDeep(descriptor.render({}));
+  const found = [];
+  (function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.type === toastStub) found.push(node);
+    if (node.props && node.props.children !== undefined) walk(node.props.children);
+    if (Array.isArray(node.children)) node.children.forEach(walk);
+  })(tree);
+  return found;
+}
+
+test('U21ag 实时保存：写回失败 → 官方失败 Toast（带原因），再次拨动开关会重新 POST', async () => {
   const app = load({ probeBody: DESKTOP_PROBE, lang: 'zh-CN', configPostFail: true, configGetBody: CONFIG_GET });
   app.captured.exports.apply(app.ctx, {});
   await flush();
@@ -1655,32 +1691,33 @@ test('U21ag 实时保存：写回失败 → 红字提示（带原因），再次
   app.resetHooks();
   let tree = renderDeep(descriptor.render({}));
   firstRoleSwitch(findSwitchRowStrict(tree, '允许重启')).props.onClick();
-  assert.equal(app.configPosts.length, 1, '拨动即 POST（失败也是先把请求发出去）');
+  await flush();
+  assert.equal(app.configPosts.length, 1, '拨动后队列发出 POST');
   await flush();
   await flush();
 
-  // 红字：saveState=-1 → dsrn-failed 状态行，文案 = 保存失败 + 服务端原因
-  app.resetHooks();
-  tree = renderDeep(descriptor.render({}));
-  const failedRows = findByClass(tree, 'dsrn-failed');
-  assert.ok(failedRows.length >= 1, '写回失败必须在界面上显红字（静默失败是 issue #1 的次生原因）');
-  const failedText = failedRows.map((n) => textOf(n).join('')).join(' ');
-  assert.match(failedText, /保存失败/, `红字文案缺失：${failedText}`);
-  assert.match(failedText, /config-write-failed/, '红字须带服务端失败原因，不能只说失败');
+  // 失败 Toast：官方 Toast 桩被渲染，props 带原因、无 success tone、带官方警告图标
+  const failToasts = collectToasts(app, descriptor);
+  assert.equal(failToasts.length, 1, '写回失败必须渲染失败 Toast（静默失败是 issue #1 的次生原因）');
+  assert.match(String(failToasts[0].props.text), /保存失败/, '失败文案缺失');
+  assert.match(String(failToasts[0].props.text), /config-write-failed/, '失败须带服务端原因，不能只说失败');
+  assert.equal(failToasts[0].props.tone, undefined, '失败不得使用 success tone');
+  assert.ok(failToasts[0].props.icon, '失败须带官方警告图标');
   // 本地值保留：开关显示已拨过去的值（界面即时生效不依赖落盘）
-  const rowAfter = findSwitchRowStrict(tree, '允许重启');
+  app.resetHooks();
+  const rowAfter = findSwitchRowStrict(renderDeep(descriptor.render({})), '允许重启');
   assert.ok(rowAfter, '失败后允许重启开关行仍在');
   assert.equal(firstRoleSwitch(rowAfter).props['aria-checked'], false, '失败后开关本地值仍生效');
-  assert.equal(findByClass(tree, 'dsrn-ok').length, 0, '失败时不得残留「已保存」提示');
 
   // 再次拨动 → 重新 POST（saveState=-1 的重试语义：下一次改动自动重试）
   firstRoleSwitch(rowAfter).props.onClick();
+  await flush();
   assert.equal(app.configPosts.length, 2, '再次拨动开关必须重新 POST /config');
   assert.equal(app.configPosts[1].body.allowRestart, true, '重试写回的是这一次的新值');
   await flush();
 });
 
-test('U21ah 实时保存：写回成功显示「已保存 ✓」（中英文）', async () => {
+test('U21ah 实时保存：写回成功显示「已保存 ✓」官方 Toast（中英文）', async () => {
   for (const [lang, savedText, switchLabel] of [
     ['zh-CN', '已保存 ✓', '二次确认'],
     ['en-US', 'Saved ✓', 'Ask for confirmation'],
@@ -1688,23 +1725,173 @@ test('U21ah 实时保存：写回成功显示「已保存 ✓」（中英文）'
     const app = load({ probeBody: DESKTOP_PROBE, lang, configGetBody: CONFIG_GET });
     app.captured.exports.apply(app.ctx, {});
     await flush();
-    const { descriptor, tree } = await openSettings(app);
-    assert.equal(findByClass(tree, 'dsrn-ok').length, 0, '改动前不该有已保存提示');
-
-    const row = findSwitchRowStrict(tree, switchLabel);
-    assert.ok(row, `${lang} 设置页须有「${switchLabel}」开关行`);
-    firstRoleSwitch(row).props.onClick();
-    assert.equal(app.configPosts.length, 1, `${lang} 拨动即写回`);
-    await flush();
-    await flush();
+    const { descriptor } = await openSettings(app);
+    assert.equal(collectToasts(app, descriptor).length, 0, '改动前不该有保存 Toast');
 
     app.resetHooks();
-    const tree2 = renderDeep(descriptor.render({}));
-    const okRows = findByClass(tree2, 'dsrn-ok');
-    assert.equal(okRows.length, 1, `${lang} 写回成功须显示已保存提示`);
-    assert.ok(textOf(okRows[0]).join('').includes(savedText), `${lang} 已保存文案缺失`);
-    assert.equal(findByClass(tree2, 'dsrn-failed').length, 0, '成功时不得残留红字');
+    const row = findSwitchRowStrict(renderDeep(descriptor.render({})), switchLabel);
+    assert.ok(row, `${lang} 设置页须有「${switchLabel}」开关行`);
+    firstRoleSwitch(row).props.onClick();
+    await flush();
+    assert.equal(app.configPosts.length, 1, `${lang} 拨动后写回`);
+    await flush();
+    await flush();
+
+    const toasts = collectToasts(app, descriptor);
+    assert.equal(toasts.length, 1, `${lang} 写回成功须显示已保存 Toast`);
+    assert.equal(toasts[0].props.tone, 'success', `${lang} 成功 Toast 须用 success tone`);
+    assert.ok(String(toasts[0].props.text).includes(savedText), `${lang} 已保存文案缺失`);
   }
+});
+
+
+// 串行队列：控制每个响应，验证旧请求未完成时不能乱序写盘。
+test('快速更改普通及入口开关：延迟响应时串行写入并保留全部新值', async () => {
+  const pending = [];
+  const app = load({ probeBody: DESKTOP_PROBE, configGetBody: CONFIG_GET,
+    configPostResponder: (body) => { const d = deferred(); pending.push({ ...d, body }); return d.promise; } });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  const { descriptor } = await openSettings(app);
+  function click(label) {
+    app.resetHooks();
+    firstRoleSwitch(findSwitchRowStrict(renderDeep(descriptor.render({})), label)).props.onClick();
+  }
+  click('允许重启'); await flush();
+  click('二次确认');
+  click('侧栏底部');
+  await flush();
+  assert.equal(pending.length, 1, '旧请求未完成时不得并发后续全量写入');
+  for (let i = 0; i < 3; i++) {
+    assert.equal(pending.length, i + 1);
+    const req = pending[i];
+    req.resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: req.body }) });
+    await flush();
+  }
+  const last = app.configPosts.at(-1).body;
+  assert.equal(last.allowRestart, false);
+  assert.equal(last.confirm, false);
+  assert.equal(last.entryFooter, false);
+  assert.deepEqual(Object.keys(last).sort(), [...PERSIST_KEYS].sort());
+  assert.ok(!app.injected.some((entry) => entry.slotName === 'sidebar.footer.action'));
+});
+
+test('旧保存响应不能覆盖未失焦的路径草稿，失焦保存当前输入', async () => {
+  const pending = [];
+  const app = load({ probeBody: DESKTOP_PROBE, configGetBody: CONFIG_GET,
+    configPostResponder: (body) => { const d = deferred(); pending.push({ ...d, body }); return d.promise; } });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  const { descriptor } = await openSettings(app);
+  const tree = () => { app.resetHooks(); return renderDeep(descriptor.render({})); };
+  firstRoleSwitch(findSwitchRowStrict(tree(), '允许重启')).props.onClick(); await flush();
+  const draft = 'D:\\Tools\\draft.exe';
+  findInput(tree()).props.onChange({ target: { value: draft } });
+  pending[0].resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: pending[0].body }) });
+  await flush();
+  assert.equal(findInput(tree()).props.value, draft, '旧响应不得覆盖正在编辑的路径');
+  assert.equal(pending.length, 1, '未失焦不提交路径');
+  findInput(tree()).props.onBlur({ target: { value: draft } }); await flush();
+  assert.equal(pending[1].body.exePath, draft);
+  pending[1].resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: pending[1].body }) });
+  await flush();
+});
+
+test('失败字段在后续成功后仍可见，重试成功才清除', async () => {
+  const pending = [];
+  const app = load({ probeBody: DESKTOP_PROBE, configGetBody: CONFIG_GET,
+    configPostResponder: (body) => { const d = deferred(); pending.push({ ...d, body }); return d.promise; } });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  const { descriptor } = await openSettings(app);
+  const tree = () => { app.resetHooks(); return renderDeep(descriptor.render({})); };
+  firstRoleSwitch(findSwitchRowStrict(tree(), '允许重启')).props.onClick(); await flush();
+  pending[0].resolve({ ok: false, status: 400, json: async () => ({ ok: false, reason: 'disk-full' }) }); await flush();
+  assert.match(textOf(tree()).join(' '), /disk-full/);
+  firstRoleSwitch(findSwitchRowStrict(tree(), '二次确认')).props.onClick(); await flush();
+  pending[1].resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: pending[1].body }) }); await flush();
+  assert.match(textOf(tree()).join(' '), /disk-full/, '其他字段成功不得掩盖失败');
+  const retry = findReactButton(tree(), '重试保存'); assert.ok(retry); retry.props.onClick(); await flush();
+  assert.equal(pending[2].body.allowRestart, false);
+  assert.equal(pending[2].body.confirm, false);
+  pending[2].resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: pending[2].body }) }); await flush();
+  assert.equal(findReactButton(tree(), '重试保存'), null);
+});
+
+test('同字段新值在队列中时重试不得恢复旧失败值', async () => {
+  const pending = [];
+  const app = load({ probeBody: DESKTOP_PROBE, configGetBody: CONFIG_GET,
+    configPostResponder: (body) => { const d = deferred(); pending.push({ ...d, body }); return d.promise; } });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  const { descriptor } = await openSettings(app);
+  const tree = () => { app.resetHooks(); return renderDeep(descriptor.render({})); };
+  const toggle = () => firstRoleSwitch(findSwitchRowStrict(tree(), '允许重启')).props.onClick();
+  toggle(); await flush();
+  pending[0].resolve({ ok: false, status: 400, json: async () => ({ ok: false, reason: 'disk-full' }) }); await flush();
+  assert.ok(findReactButton(tree(), '重试保存'));
+  toggle(); await flush();
+  assert.equal(pending[1].body.allowRestart, true, '新操作将开关恢复为开');
+  const retry = findReactButton(tree(), '重试保存');
+  if (retry && !retry.props.disabled) retry.props.onClick();
+  pending[1].resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: pending[1].body }) }); await flush();
+  for (let i = 2; i < pending.length; i++) {
+    assert.equal(pending[i].body.allowRestart, true, '重试不能把旧失败值重新写盘');
+    pending[i].resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: pending[i].body }) }); await flush();
+  }
+  assert.equal(app.configPosts.at(-1).body.allowRestart, true);
+  assert.equal(firstRoleSwitch(findSwitchRowStrict(tree(), '允许重启')).props['aria-checked'], true);
+});
+
+test('队列仍有未完成保存时不得提前显示成功 Toast', async () => {
+  const pending = [];
+  const app = load({ probeBody: DESKTOP_PROBE, configGetBody: CONFIG_GET,
+    configPostResponder: (body) => { const d = deferred(); pending.push({ ...d, body }); return d.promise; } });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  const { descriptor } = await openSettings(app);
+  const tree = () => { app.resetHooks(); return renderDeep(descriptor.render({})); };
+  firstRoleSwitch(findSwitchRowStrict(tree(), '允许重启')).props.onClick(); await flush();
+  firstRoleSwitch(findSwitchRowStrict(tree(), '二次确认')).props.onClick(); await flush();
+  assert.equal(pending.length, 1);
+  pending[0].resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: pending[0].body }) }); await flush();
+  assert.equal(pending.length, 2);
+  assert.ok(!collectToasts(app, descriptor).some((toast) => toast.props.tone === 'success'), '后续写入尚在途时不能显示已保存');
+  pending[1].resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: pending[1].body }) }); await flush();
+  assert.ok(collectToasts(app, descriptor).some((toast) => toast.props.tone === 'success'), '全部写入完成后应显示成功');
+});
+
+test('重挂设置页时在途保存完成，开关同步且不覆盖新路径草稿', async () => {
+  const pending = [];
+  const app = load({ probeBody: DESKTOP_PROBE, configGetBody: { ...CONFIG_GET },
+    configPostResponder: (body) => { const d = deferred(); pending.push({ ...d, body }); return d.promise; } });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  const descriptor = app.injected.find((i) => i.slotName === 'settings.section').factory();
+  app.resetHooks(); renderDeep(descriptor.render({}));
+  const cleanups = app.takeEffects().map((fn) => fn()).filter((fn) => typeof fn === 'function');
+  await flush();
+  const tree = () => { app.resetHooks(); return renderDeep(descriptor.render({})); };
+  firstRoleSwitch(findSwitchRowStrict(tree(), '允许重启')).props.onClick(); await flush();
+  for (const cleanup of cleanups) cleanup();
+  app.remountHooks(); renderDeep(descriptor.render({}));
+  for (const fn of app.takeEffects()) fn();
+  await flush();
+  const draft = 'D:\\new\\draft.exe';
+  findInput(tree()).props.onChange({ target: { value: draft } });
+  pending[0].resolve({ ok: true, status: 200, json: async () => ({ ok: true, config: pending[0].body }) }); await flush();
+  assert.equal(firstRoleSwitch(findSwitchRowStrict(tree(), '允许重启')).props['aria-checked'], false, '重挂后应反映成功的新值');
+  assert.equal(findInput(tree()).props.value, draft, '响应不能覆盖新实例中未失焦的草稿');
+});
+
+test('服务端已写入但响应断开后，后续全量写不得覆盖成功值', async () => {
+  const pending = [];
+  const configGetBody = { ...CONFIG_GET, config: { ...DESKTOP_PROBE.config } };
+  const app = load({ probeBody: DESKTOP_PROBE, configGetBody,
+    configPostResponder: (body) => { const d = deferred(); pending.push({ ...d, body }); return d.promise; } });
+  app.captured.exports.apply(app.ctx, {}); await flush();
+  const { descriptor } = await openSettings(app);
+  const tree = () => { app.resetHooks(); return renderDeep(descriptor.render({})); };
+  firstRoleSwitch(findSwitchRowStrict(tree(), '允许重启')).props.onClick(); await flush();
+  configGetBody.config = { ...pending[0].body }; // 服务端实际落盘成功，但连接在响应前断开。
+  pending[0].reject(new Error('connection lost after commit')); await flush();
+  firstRoleSwitch(findSwitchRowStrict(tree(), '二次确认')).props.onClick(); await flush();
+  assert.equal(pending.length, 1, '结果未知时必须暂停后续全量写入，不能覆盖已成功的写入');
+  assert.match(textOf(tree()).join(' '), /保存结果未知.*暂停/, '暂停及结果未知必须可见');
 });
 
 // 所有动作请求都在 VM 内由可控 Promise 模拟，绝不触及真实服务。
