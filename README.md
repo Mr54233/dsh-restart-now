@@ -1,5 +1,7 @@
 # dsh-restart-now
 
+[中文](README.md) | [English](README.en.md)
+
 [![npm](https://img.shields.io/npm/v/dsh-restart-now?label=npm&color=cb3837)](https://www.npmjs.com/package/dsh-restart-now)
 [![license](https://img.shields.io/npm/l/dsh-restart-now)](https://www.npmjs.com/package/dsh-restart-now)
 [![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20DSH%20Desktop-0078d4)](#适用范围)
@@ -102,13 +104,11 @@ macOS 先发 SIGTERM 请主进程体面退出（10 秒未退再 SIGKILL 升级�
 - **操作系统**：Windows 10/11 与 macOS 12+（Intel / Apple Silicon）；其它系统上插件不挂载任何入口。
 - **DSH Desktop**：声明支持 `>=0.2.0-0`；并非保证所有未来版本均已验证。Windows 上曾验证桌面重启链路；本版新增改动尚未在 macOS 真机完整验收。设置页显示实际版本，超出声明范围时提示。
   Web profile / `dsh web` 下不生效。
+  **macOS 支持需要真机贡献者**——维护者手头没有 macOS 机器，欢迎有条件的朋友[参与适配与验证](CONTRIBUTING.md#macos)。
 - 无需系统 Node：助手用应用自带运行时（macOS 上就是应用自身二进制 + `ELECTRON_RUN_AS_NODE=1`）。
 
 ## 开发
 
-```bash
-npm test            # node:test，Windows / macOS 均可跑，零进程副作用
-npm pack --dry-run  # 校验 tarball 内容（CI 在 Windows / macOS 上都会跑）
-```
+见[贡献指南](CONTRIBUTING.md)。
 
 架构与实现细节（门禁链、重启机制、客户端槽位、勘误史）见仓库 `docs/` 下的设计文档。
