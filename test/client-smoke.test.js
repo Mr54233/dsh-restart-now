@@ -1301,9 +1301,10 @@ test('U21aa2 宿主菜单条不存在（mac/web/上游改版）→ 零注入零�
   assert.equal(savedHost.__menubar.children.length, 3, '宿主出现后 observer 回调补挂「重启」项');
 });
 
-test('U21ab 两击式确认：第一次点变「确认重启」（4s 超时回弹），第二次才 POST /restart', async () => {
+test('U21ab 两击式确认：confirm 开启时第一次点变「确认重启」，第二次才 POST；confirm 关闭则单击直接 POST', async () => {
+  // ① confirm 开启（默认）：两击式
   const env = load({
-    probeBody: { ...DESKTOP_PROBE, config: { ...DESKTOP_PROBE.config, confirm: false } },
+    probeBody: { ...DESKTOP_PROBE, config: { ...DESKTOP_PROBE.config, confirm: true } },
     windowsMenu: ['应用', '编辑'],
   });
   env.captured.exports.apply(env.ctx, {});
@@ -1311,7 +1312,7 @@ test('U21ab 两击式确认：第一次点变「确认重启」（4s 超时回�
   const btn = env.menuHost.__menubar.children[2];
   env.fetchCalls.length = 0;
 
-  // 第一次点击：进入确认态，不发请求（即使 confirm:false 也强制确认——标题栏误触代价高）
+  // 第一次点击：进入确认态，不发请求
   btn.__dispatch('click');
   assert.equal(btn.textContent, '确认重启', '第一次点击必须变成确认文案');
   assert.ok(!env.fetchCalls.some((c) => c.init && c.init.method === 'POST'), '确认前绝不能 POST');
@@ -1323,8 +1324,19 @@ test('U21ab 两击式确认：第一次点变「确认重启」（4s 超时回�
     '确认后的第二次点击才触发受守卫 POST /restart');
   assert.equal(btn.disabled, true, 'busy 态按钮禁用');
 
-  // 拒绝路径：非 202 → 「重启失败」短文案后回弹（利用 fetch 桩默认回 200 非 202 的行为）
+  // ② confirm:false（用户裁定：与其它入口同语义）→ 单击直接执行
+  const noConfirm = load({
+    probeBody: { ...DESKTOP_PROBE, config: { ...DESKTOP_PROBE.config, confirm: false } },
+    windowsMenu: ['应用', '编辑'],
+  });
+  noConfirm.captured.exports.apply(noConfirm.ctx, {});
   await flush();
+  const btn2 = noConfirm.menuHost.__menubar.children[2];
+  noConfirm.fetchCalls.length = 0;
+  btn2.__dispatch('click');
+  assert.equal(btn2.textContent, '正在重启…', 'confirm:false 时单击即执行（不进两击式）');
+  assert.ok(noConfirm.fetchCalls.some((c) => String(c.url).endsWith('/restart') && c.init.method === 'POST'),
+    'confirm:false 单击必须直接 POST /restart');
 });
 
 test('U21ab2 确认超时回弹：4 秒内未点第二次 → 回到「重启」可重试', async () => {
