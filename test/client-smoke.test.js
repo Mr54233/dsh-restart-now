@@ -554,7 +554,7 @@ test('U21c6 v1.2.1 平台鉴权：请求必须带 cookie，且配置页有逃生
     '不得省略凭据：启用平台鉴权后界面操作会全部 401');
   assert.match(source, /credentials:\s*'same-origin'/, '同源请求须携带平台会话 cookie');
   assert.ok(source.includes("key: 'platformAuth'"), '配置页须有平台鉴权开关（逃生门）');
-  assert.ok(source.includes('platformAuth: s.cfg.platformAuth !== false'), '保存时须写回平台鉴权键');
+  assert.ok(source.includes('platformAuth: next.platformAuth !== false'), '实时保存须写回平台鉴权键');
   assert.ok(source.includes('platformAuth: base.platformAuth !== false'),
     '入口开关写回时也须保留平台鉴权键（否则写丢后自动关闭鉴权）');
   assert.ok(source.includes('res.status === 401'), '界面须单独识别 401（与 403 文案分开）');
@@ -1466,6 +1466,245 @@ test('U21ac entryTitlebar 开关：false 时不注入，拨开关即时摘除/�
   sw2.props.onClick();
   await flush();
   assert.equal(on.menuHost.__menubar.children.length, 3, '重新打开后菜单项须恢复注入');
+});
+
+// —— v1.4.0 实时保存（保存按钮移除）——
+// 设置页改动即写回：开关拨动立即 POST /config 全量键；exePath 输入只改本地、onBlur 才 persistNow；
+// saveState 1=短暂「已保存 ✓」/-1=红字带原因（下一次改动自动重试）。五条守住行为契约：
+// 全量键不丢、保存按钮不再存在、打字不发请求、失败可见且可重试、成功有提示。
+
+/** GET /config 的现实形态（设置页挂载 effect 的响应）：ok + config + derivedExe */
+const CONFIG_GET = { ok: true, config: DESKTOP_PROBE.config, derivedExe: DESKTOP_PROBE.derivedExe };
+
+/** persistNow 全量写回的键集合：POST /config 落盘是整文件替换，漏键抹掉用户其它偏好 */
+const PERSIST_KEYS = ['allowRestart', 'confirm', 'exePath', 'entryPanel', 'entryFooter',
+  'entryHeader', 'entrySettingsRow', 'entryTitlebar', 'platformAuth'];
+
+/** 打开设置页到「加载完成」态：首渲染 + 跑挂载 effect（GET /config）+ 等 Promise 落地 + 重渲染。
+ *  注意只执行第一遍的 effect；后续重渲染登记的 effect 不再运行（重跑会用 GET 响应覆盖用户改动）。 */
+async function openSettings(app) {
+  const section = app.injected.find((i) => i.slotName === 'settings.section');
+  assert.ok(section, '设置页槽位未注册');
+  const descriptor = section.factory();
+  app.resetHooks();
+  renderDeep(descriptor.render({}));
+  for (const fn of app.takeEffects()) fn();
+  await flush();
+  await flush();
+  app.resetHooks();
+  return { descriptor, tree: renderDeep(descriptor.render({})) };
+}
+
+/** 收集 React 元素树里全部 type==='button' 的元素（保存按钮移除断言用） */
+function collectButtons(tree, out = []) {
+  (function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { for (const child of node) walk(child); return; }
+    if (node.type === 'button') out.push(node);
+    if (node.props && node.props.children !== undefined) walk(node.props.children);
+    if (Array.isArray(node.children)) node.children.forEach(walk);
+  })(tree);
+  return out;
+}
+
+/** 在 React 元素树里按 className 收集元素（红字/已保存提示用） */
+function findByClass(tree, cls, out = []) {
+  (function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { for (const child of node) walk(child); return; }
+    if (node.props && node.props.className === cls) out.push(node);
+    if (node.props && node.props.children !== undefined) walk(node.props.children);
+    if (Array.isArray(node.children)) node.children.forEach(walk);
+  })(tree);
+  return out;
+}
+
+/** exePath 输入框：设置页唯一的 type==='input' 元素 */
+function findInput(tree) {
+  return (function walk(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) { for (const child of node) { const hit = walk(child); if (hit) return hit; } return null; }
+    if (node.type === 'input') return node;
+    if (node.props && node.props.children !== undefined) { const hit = walk(node.props.children); if (hit) return hit; }
+    return Array.isArray(node.children) ? walk(node.children) : null;
+  })(tree);
+}
+
+/** 与 findSwitchRow 同型，但只在「真的带 role=switch」的行里找。
+ *  必要性：allowRestart 拨关后，重启行主按钮的 title 也会变成「允许重启」（client.js 1631 行），
+ *  且重启行排在开关行之前——按纯文本匹配会撞到重启行（它没有开关）返回 null。 */
+function findSwitchRowStrict(tree, labelNeedle) {
+  const rows = [];
+  (function collect(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(collect); return; }
+    if (node.props && node.props.className === 'dsrn-field') rows.push(node);
+    if (node.props && node.props.children !== undefined) collect(node.props.children);
+    if (Array.isArray(node.children)) node.children.forEach(collect);
+  })(tree);
+  return rows.find((row) => textOf(row).join(' ').includes(labelNeedle) && firstRoleSwitch(row)) || null;
+}
+
+test('U21ad 实时保存：拨 allowRestart/confirm/platformAuth 立即 POST /config 且全量键不丢', async () => {
+  const app = load({ probeBody: DESKTOP_PROBE, lang: 'zh-CN', configGetBody: CONFIG_GET });
+  app.captured.exports.apply(app.ctx, {});
+  await flush();
+  const { descriptor } = await openSettings(app);
+  assert.equal(app.configPosts.length, 0, '前置：配置层已表态（entriesDeclared），加载不迁移、零写回');
+
+  // 三个开关逐个拨动。React 语义：setState 后要重渲染才有新闭包——
+  // 每次拨动后重渲染，从新树上取下一个开关（同 U21ac 的既有做法）。
+  const toggles = [
+    { label: '允许重启', key: 'allowRestart' },
+    { label: '二次确认', key: 'confirm' },
+    { label: '平台会话鉴权', key: 'platformAuth' },
+  ];
+  for (const [index, item] of toggles.entries()) {
+    app.resetHooks();
+    const tree = renderDeep(descriptor.render({}));
+    const row = findSwitchRowStrict(tree, item.label);
+    assert.ok(row, `设置页须有「${item.label}」开关行`);
+    const sw = firstRoleSwitch(row);
+    assert.equal(sw.props['aria-checked'], true, `第 ${index + 1} 次拨动前「${item.label}」应为开`);
+    sw.props.onClick();
+    // 「拨动即写回」：onClick 同步发出 POST，不经过任何去抖/保存按钮
+    assert.equal(app.configPosts.length, index + 1, `拨动「${item.label}」须立即产生第 ${index + 1} 次 POST /config`);
+    await flush();
+    const post = app.configPosts[index];
+    assert.equal(post.body[item.key], false, `${item.key} 拨关后的新值须落盘`);
+    assert.deepEqual(Object.keys(post.body).sort(), [...PERSIST_KEYS].sort(),
+      '写回 body 必须是全量键（POST /config 是整文件替换，漏键抹掉用户其它偏好）');
+  }
+
+  // 三次写回彼此不丢：每次 POST 都携带此前全部改动，platformAuth 不被丢
+  const bodies = app.configPosts.map((p) => p.body);
+  assert.deepEqual([bodies[0].allowRestart, bodies[0].confirm, bodies[0].platformAuth],
+    [false, true, true], '第 1 次写回：只动了 allowRestart，其余键保持原值');
+  assert.deepEqual([bodies[1].allowRestart, bodies[1].confirm, bodies[1].platformAuth],
+    [false, false, true], '第 2 次写回：此前改动被携带，platformAuth 未丢');
+  assert.deepEqual([bodies[2].allowRestart, bodies[2].confirm, bodies[2].platformAuth],
+    [false, false, false], '第 3 次写回：三次改动全部在场（platformAuth 拨关必须落盘，否则锁死自救入口）');
+  assert.equal(bodies[2].exePath, '', '输入框里仍是推导路径时落盘 \'\'（保持自动跟随安装位置）');
+});
+
+test('U21ae 实时保存：设置页不存在「保存」按钮（dsrn-save/t(\'save\') 已移除）', async () => {
+  // 源码级：v1.4.0 删掉保存按钮——不得再有 dsrn-save 类的按钮元素与 t('save') 文案
+  // （状态行 t('saved')/t('saveFailed') 保留，注意别误伤；CSS 里的 .dsrn-save 死规则不在断言范围）
+  assert.ok(!/className:\s*['"`][^'"`]*dsrn-save/.test(source), '源码不得再用 dsrn-save 类渲染保存按钮');
+  assert.ok(!source.includes("t('save')"), '保存按钮文案 t(\'save\') 应已移除');
+  for (const [lang, saveLabel] of [['zh-CN', '保存配置'], ['en-US', 'Save']]) {
+    const app = load({ probeBody: DESKTOP_PROBE, lang, configGetBody: CONFIG_GET });
+    app.captured.exports.apply(app.ctx, {});
+    await flush();
+    const { tree } = await openSettings(app);
+    const buttons = collectButtons(tree);
+    assert.ok(buttons.length > 0, `${lang} 设置页仍应有其它按钮（重启/预检/开关）`);
+    for (const button of buttons) {
+      assert.ok(!String(button.props.className || '').includes('dsrn-save'),
+        `${lang} 设置页不得出现 dsrn-save 按钮`);
+      assert.ok(!textOf(button).join('').includes(saveLabel),
+        `${lang} 设置页不得出现「${saveLabel}」按钮`);
+    }
+  }
+});
+
+test('U21af 实时保存：exePath 打字只改本地不发请求，onBlur 才写回', async () => {
+  const app = load({ probeBody: DESKTOP_PROBE, lang: 'zh-CN', configGetBody: CONFIG_GET });
+  app.captured.exports.apply(app.ctx, {});
+  await flush();
+  const { descriptor } = await openSettings(app);
+  const trafficBefore = app.fetchCalls.length; // 挂载探测 + GET /config
+  assert.equal(app.configPosts.length, 0, '前置：加载后没有写回');
+
+  app.resetHooks();
+  let input = findInput(renderDeep(descriptor.render({})));
+  assert.ok(input, '设置页应有 exePath 输入框');
+
+  // 打字：每个字符 onChange 只改本地状态；等一轮微任务也不该有任何请求。
+  // React 语义：setState 后重渲染出新闭包——每敲一步重渲染，从新树上拿下一步的 handler。
+  const typed = ['D', 'D:\\', 'D:\\Tools', 'D:\\Tools\\MyApp.exe'];
+  for (const value of typed) {
+    input.props.onChange({ target: { value } });
+    await flush();
+    assert.equal(app.fetchCalls.length, trafficBefore, `打字「${value}」时不得发任何请求`);
+    assert.equal(app.configPosts.length, 0, '打字过程绝不 POST /config');
+    app.resetHooks();
+    input = findInput(renderDeep(descriptor.render({})));
+    assert.equal(input.props.value, value, 'onChange 只改本地状态：输入框 value 应跟随');
+  }
+
+  // 失焦才写回：一次 onBlur 恰好一次 POST，body 带输入框现值且仍是全量键
+  input.props.onBlur();
+  assert.equal(app.configPosts.length, 1, 'onBlur 须立即写回 /config');
+  assert.equal(app.fetchCalls.length, trafficBefore + 1, 'onBlur 恰好多一次请求');
+  assert.equal(app.configPosts[0].body.exePath, 'D:\\Tools\\MyApp.exe',
+    '失焦写回的是输入框现值（非推导路径，不得被清成 \'\'）');
+  assert.deepEqual(Object.keys(app.configPosts[0].body).sort(), [...PERSIST_KEYS].sort(),
+    'exePath 写回同样是全量键');
+  await flush();
+});
+
+test('U21ag 实时保存：写回失败 → 红字提示（带原因），再次拨动开关会重新 POST', async () => {
+  const app = load({ probeBody: DESKTOP_PROBE, lang: 'zh-CN', configPostFail: true, configGetBody: CONFIG_GET });
+  app.captured.exports.apply(app.ctx, {});
+  await flush();
+  const { descriptor } = await openSettings(app);
+  assert.equal(app.configPosts.length, 0, '前置：配置层已表态，挂载不迁移');
+
+  // 拨 allowRestart → POST /config 失败（configPostFail 模拟配置文件只读）
+  app.resetHooks();
+  let tree = renderDeep(descriptor.render({}));
+  firstRoleSwitch(findSwitchRowStrict(tree, '允许重启')).props.onClick();
+  assert.equal(app.configPosts.length, 1, '拨动即 POST（失败也是先把请求发出去）');
+  await flush();
+  await flush();
+
+  // 红字：saveState=-1 → dsrn-failed 状态行，文案 = 保存失败 + 服务端原因
+  app.resetHooks();
+  tree = renderDeep(descriptor.render({}));
+  const failedRows = findByClass(tree, 'dsrn-failed');
+  assert.ok(failedRows.length >= 1, '写回失败必须在界面上显红字（静默失败是 issue #1 的次生原因）');
+  const failedText = failedRows.map((n) => textOf(n).join('')).join(' ');
+  assert.match(failedText, /保存失败/, `红字文案缺失：${failedText}`);
+  assert.match(failedText, /config-write-failed/, '红字须带服务端失败原因，不能只说失败');
+  // 本地值保留：开关显示已拨过去的值（界面即时生效不依赖落盘）
+  const rowAfter = findSwitchRowStrict(tree, '允许重启');
+  assert.ok(rowAfter, '失败后允许重启开关行仍在');
+  assert.equal(firstRoleSwitch(rowAfter).props['aria-checked'], false, '失败后开关本地值仍生效');
+  assert.equal(findByClass(tree, 'dsrn-ok').length, 0, '失败时不得残留「已保存」提示');
+
+  // 再次拨动 → 重新 POST（saveState=-1 的重试语义：下一次改动自动重试）
+  firstRoleSwitch(rowAfter).props.onClick();
+  assert.equal(app.configPosts.length, 2, '再次拨动开关必须重新 POST /config');
+  assert.equal(app.configPosts[1].body.allowRestart, true, '重试写回的是这一次的新值');
+  await flush();
+});
+
+test('U21ah 实时保存：写回成功显示「已保存 ✓」（中英文）', async () => {
+  for (const [lang, savedText, switchLabel] of [
+    ['zh-CN', '已保存 ✓', '二次确认'],
+    ['en-US', 'Saved ✓', 'Ask for confirmation'],
+  ]) {
+    const app = load({ probeBody: DESKTOP_PROBE, lang, configGetBody: CONFIG_GET });
+    app.captured.exports.apply(app.ctx, {});
+    await flush();
+    const { descriptor, tree } = await openSettings(app);
+    assert.equal(findByClass(tree, 'dsrn-ok').length, 0, '改动前不该有已保存提示');
+
+    const row = findSwitchRowStrict(tree, switchLabel);
+    assert.ok(row, `${lang} 设置页须有「${switchLabel}」开关行`);
+    firstRoleSwitch(row).props.onClick();
+    assert.equal(app.configPosts.length, 1, `${lang} 拨动即写回`);
+    await flush();
+    await flush();
+
+    app.resetHooks();
+    const tree2 = renderDeep(descriptor.render({}));
+    const okRows = findByClass(tree2, 'dsrn-ok');
+    assert.equal(okRows.length, 1, `${lang} 写回成功须显示已保存提示`);
+    assert.ok(textOf(okRows[0]).join('').includes(savedText), `${lang} 已保存文案缺失`);
+    assert.equal(findByClass(tree2, 'dsrn-failed').length, 0, '成功时不得残留红字');
+  }
 });
 
 // 所有动作请求都在 VM 内由可控 Promise 模拟，绝不触及真实服务。
