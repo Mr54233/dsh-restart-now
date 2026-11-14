@@ -64,7 +64,7 @@ test('U19d summarizeReceipt：成功 → status ok 且带停机时长', () => {
 });
 
 test('回执保留监听观测并区分无结果，不将探测作为启动成功的证明', () => {
-  for (const verdict of ['ok', 'timeout', 'unsupported']) {
+  for (const verdict of ['ok', 'serving', 'timeout', 'unsupported']) {
     const summary = summarizeReceipt({ respawnedAt: 'x', webListen: { verdict } });
     assert.equal(summary.status, 'ok');
     assert.deepEqual(summary.webListen, { verdict });

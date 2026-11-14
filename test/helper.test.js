@@ -23,6 +23,7 @@ import assert from 'node:assert/strict';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
+import { EventEmitter } from 'node:events';
 import {
   appleScriptLiteral, ARTIFACT_RE, artifactPaths, buildHelperScript, buildHelperSpawn,
   collectDescendants, HELPER_PLATFORMS, MAC_TOOLS, MAIN_STOP_GRACE_MS, macAlertScript,
@@ -446,6 +447,56 @@ test('U14d darwin 纯函数：AppleScript 转义 / 弹窗 / lsof 端口 / ps 进
   assert.deepEqual([...HELPER_PLATFORMS], ['win32', 'darwin']);
   assert.equal(MAIN_STOP_GRACE_MS, 10000, 'macOS 停机宽限默认 10s：给 Electron 体面退出的机会');
   assert.throws(() => buildHelperScript({ platform: 'linux' }), TypeError, '不支持的平台必须显式抛错');
+});
+
+// 仅执行生成脚本中的观察函数；系统调用及网络全部 mock，绝不启动或结束进程。
+test('HTTP 观察有边界：仅 loopback 2xx，拒绝无效端口、超时和异常', async () => {
+  for (const platform of ['win32', 'darwin']) {
+    let calls = [];
+    let mode = 200;
+    const http = { get(options, callback) {
+      calls.push(options);
+      if (mode === 'throw') throw new Error('failed');
+      const req = new EventEmitter();
+      req.destroy = () => {};
+      queueMicrotask(() => {
+        if (mode === 'error') req.emit('error', new Error('failed'));
+        else if (typeof mode === 'number') callback({ statusCode: mode, destroy() {} });
+      });
+      return req;
+    } };
+    const source = (platform === 'win32' ? makeScript() : makeMacScript()).split('(async () => {')[0];
+    const context = { require: (name) => name === 'node:http' ? http : {}, setTimeout, clearTimeout, Buffer };
+    const probe = runInNewContext(source + '\nprobeHttpServing', context);
+    for (const invalid of [0, -1, 65536, 1.5, NaN, '80']) assert.equal(await probe(invalid, 20), false);
+    assert.equal(calls.length, 0);
+    for (const [status, expected] of [[200, true], [204, true], [302, false], [404, false], [500, false], ['throw', false], ['error', false], ['hang', false]]) {
+      mode = status;
+      assert.equal(await probe(1234, 20), expected, platform + ' ' + status);
+    }
+    for (const options of calls) {
+      assert.equal(options.host, '127.0.0.1');
+      assert.equal(options.port, 1234);
+      assert.equal(options.path, '/');
+      assert.equal(options.agent, false);
+    }
+  }
+});
+
+test('Windows 监听输出中的无效端口不触发 HTTP 请求', async () => {
+  for (const output of ['ok 65536', 'ok -1', 'ok 1.5', 'ok 0', 'ok 1e2']) {
+    let requests = 0;
+    const source = makeScript().split('(async () => {')[0];
+    const wait = runInNewContext(source + '\nwaitWebListen', {
+      require: (name) => name === 'node:http' ? { get() { requests++; } }
+        : name === 'node:child_process' ? { execFileSync: () => output } : {},
+      setTimeout, clearTimeout, Buffer,
+    });
+    const result = await wait(42, 10);
+    assert.equal(result.verdict, 'ok');
+    assert.equal(result.port, 0);
+    assert.equal(requests, 0);
+  }
 });
 
 // 在隔离 VM 中执行生成的脚本：所有系统调用均为 mock，绝无真实 kill/spawn。
