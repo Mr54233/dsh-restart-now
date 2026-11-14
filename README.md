@@ -7,7 +7,7 @@
 DSH 桌面版一键重启插件（Windows 10/11 与 macOS 12+）。装/更插件、卡住、需要重开时，
 点一下就完成「关闭 → 自动拉起」，不用自己关窗口再找快捷方式。
 
-![设置 → 重启应用](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/screenshot-1-settings.png)
+![设置 → 重启应用](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/v1.4-settings.png)
 
 ## 安装
 
@@ -32,11 +32,17 @@ dsh plugin --profile desktop add dsh-restart-now
 | 设置行 | 设置 → 通用 → 重启应用 |
 | 斜杠命令 | `/restart`（支持 `--force` / `--wait`） |
 
-![侧栏面板入口](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/screenshot-2-panel.png)
+![Windows 窗口菜单栏入口](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/v1.4-titlebar.png)
 
-![另外两个轻量入口](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/screenshot-3-entries.png)
+![侧栏面板入口](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/v1.4-sidebar-panel.png)
 
-五个界面入口（侧栏面板、侧栏底部、会话标题栏、窗口菜单栏、设置行）都能在 **设置 → 重启应用** 里单独关掉（关掉即从界面撤除）；
+![会话标题栏入口](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/v1.4-conversation-header.png)
+
+![侧栏底部入口](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/v1.4-footer.png)
+
+![重启命令](https://raw.githubusercontent.com/Mr54233/dsh-restart-now/main/assets/v1.4-command.png)
+
+以上六个入口中，除 `/restart` 外的五个界面入口都能在 **设置 → 重启应用** 里单独关掉（关掉即从界面撤除）；
 `/restart` 不受界面入口开关影响，但需要宿主命令服务，且仍受总开关、环境和安全门禁约束。设置页同时显示运行版本自检、上次重启结果（停机时长或失败原因）、
 只读**重启前预检**，以及各入口统一的进行中状态（旋转 spinner + 「正在重启…/正在关闭…」，
 跨入口同步禁用防连点）。
