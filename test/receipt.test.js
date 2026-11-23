@@ -144,6 +144,9 @@ test('U19i summarizeReceipt 透传分段耗时：成功/仅关闭带合法 stage
   const junk = summarizeReceipt({ respawnedAt: 'x', atMs: NOW, hostPid: 1, stages: { prepMs: 'x' } }, NOW);
   assert.equal('stages' in junk, false, '全非法 stages 也不含该键');
 
+  const nulls = summarizeReceipt({ respawnedAt: 'x', stages: { prepMs: null, stopMainMs: '', hostExitMs: false } });
+  assert.equal('stages' in nulls, false, 'null、空串及布尔值不得被当作零耗时');
+
   // 失败回执不带 stages（分段耗时只在成功/仅关闭回执里有）
   const failed = summarizeReceipt({ failed: { reason: 'respawn-failed' }, atMs: NOW, hostPid: 1, stages: { totalMs: 1 } }, NOW);
   assert.equal(failed.status, 'failed');

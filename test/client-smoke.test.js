@@ -848,7 +848,8 @@ test('U21l 侧栏面板页：标题/说明/版本行/上次重启都在，且主
   assert.ok(text.includes('停主进程 0.4s'), `停主进程段缺失：${text.slice(0, 200)}`);
   assert.ok(text.includes('宿主退出 3.1s'), `宿主退出段缺失：${text.slice(0, 200)}`);
   assert.ok(text.includes('拉起验证 3s'), `拉起验证段缺失：${text.slice(0, 200)}`);
-  assert.ok(text.includes('HTTP 就绪 1.8s'), `HTTP 就绪观测段缺失：${text.slice(0, 200)}`);
+  assert.ok(text.includes('监听探测 1.8s'), `监听探测耗时缺失：${text.slice(0, 200)}`);
+  assert.ok(!text.includes('HTTP 就绪'), '探测耗时不能证明 HTTP 或应用已就绪');
 
   // panellist 的图标组件只吃 {size, active}，返回图标元素（整行由侧栏自己画）
   const panellist = injected.find((i) => i.slotName === 'sidebar.panellist');
