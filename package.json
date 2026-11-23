@@ -1,6 +1,6 @@
 {
   "name": "dsh-restart-now",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "DSH Desktop 一键重启与仅关闭；支持多个可配置入口、任务保护和重启预检。Windows 顶部菜单提供重启项；支持 Windows 与 macOS。 / Restart or close DSH Desktop with configurable UI entries, task safeguards and preflight diagnostics. Windows and macOS.",
   "icon": "icon.svg",
   "license": "MIT",

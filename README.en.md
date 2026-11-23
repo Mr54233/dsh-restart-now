@@ -47,9 +47,10 @@ One restart action, six entries:
 
 Of the six entries, the five UI entries can each be turned off in **Settings → Restart app** (they disappear from the UI immediately);
 `/restart` is not affected by these entry switches, but it needs the host command service and is still subject to the master switch and environment/safety gates.
-The settings page also shows a running-version self-check, the last restart result (downtime or failure reason),
+The settings page also shows a running-version self-check, the last restart result (stage timings or failure reason),
 a read-only **pre-restart preflight**, and a unified in-progress state across entries (spinner + "Restarting…/Closing…",
-synchronized disabling to prevent double-clicks).
+synchronized disabling to prevent double-clicks). A progress overlay appears after a restart or close is dispatched;
+waiting for idle remains cancellable.
 
 The sidebar panel and the settings page also offer **Close only**: after confirmation the app exits and
 **does not relaunch** — you reopen it manually. When busy, you can force-close or cancel; there is no wait option.
@@ -57,7 +58,7 @@ Restarting interrupts running output and tasks; wait mode lasts at most 30 minut
 even if tasks are still running. The helper reuses the original launch arguments when they can be parsed safely;
 otherwise it starts without arguments. If relaunching fails, reopen the app manually.
 
-### Restart safety (v1.4.0)
+### Restart safety and diagnostics
 
 - **Process identity verification**: before stopping the main process, the helper checks path, start time and related
   information; on mismatch it aborts and records the reason, reducing the risk of wrong-process operations.
@@ -122,8 +123,8 @@ of the profile's `cordis.patch.yml` entry; the file takes precedence over the pa
 
 - **OS**: Windows 10/11 and macOS 12+ (Intel / Apple Silicon); on other systems the plugin mounts no entries.
 - **DSH Desktop**: declares `>=0.2.0-0`; this is a declared range, not a guarantee that every future version is verified.
-  The restart chain has been verified on Windows; the changes in this release have not been fully verified on real
-  macOS hardware. The settings page shows the actual version and warns when it is outside the declared range.
+  Version 1.5.0 adapts to the platform session authentication interface change in `0.2.3-alpha.2`; the changes in
+  this release have not been fully verified on real macOS hardware. The settings page shows the actual version and warns when it is outside the declared range.
   Does not apply to the Web profile / `dsh web`.
   **macOS support needs contributors with real hardware** — the maintainer has no macOS machine. See
   [CONTRIBUTING](CONTRIBUTING.en.md#macos) if you can help.
