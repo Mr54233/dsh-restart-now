@@ -7,6 +7,8 @@
 //   P4 其它状态码          → rejected（保留原始码，照原码回给客户端）
 //   P5 配置 platformAuth:false → skipped，且绝不调用平台（逃生门）
 //   P6 服务缺失 / 方法缺失 / 平台抛异常 → 一律放行（bypassed / error），插件不能整体不可用
+//   P8（v1.4.1）requestRejection 缺失时落 admit（dsh 0.2.3-alpha.2+）：{ peer }→ok /
+//      { rejection:码 }→按码 / 抛异常→error；两口都在时 requestRejection 优先
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { inspectPlatformAuth, resolveConnection, summarizeAuth } from '../lib/platform-auth.js';
@@ -20,6 +22,13 @@ function ctxWith(connection) {
 function connectionReturning(value, calls = []) {
   return {
     requestRejection: async (req) => { calls.push(req); return value; },
+  };
+}
+
+// v1.4.1：只有 admit 口的新宿主（0.2.3-alpha.2+ 移除了 requestRejection）
+function connectionAdmitting(admission, calls = []) {
+  return {
+    admit: async (req) => { calls.push(req); return admission; },
   };
 }
 
@@ -97,4 +106,49 @@ test('P7 summarizeAuth：给环境口的形态固定（客户端据此显示诊�
     enforced: true, available: true, verdict: 'unauthorized', error: '',
   });
   assert.deepEqual(summarizeAuth(null).verdict, 'bypassed', '缺失时按放行回报，绝不抛');
+});
+
+// —— P8（v1.4.1）：requestRejection → admit 判定链（dsh 0.2.3-alpha.2+）——
+
+test('P8a 只有 admit 口：{ peer } → ok，原始 req 照样直传', async () => {
+  const calls = [];
+  const auth = await inspectPlatformAuth(ctxWith(connectionAdmitting({ peer: {} }, calls)), REQ);
+  assert.deepEqual(auth, { enforced: true, available: true, verdict: 'ok' });
+  assert.equal(calls.length, 1, '须把原始 req 交给 admit（凭据在 cookie/头里）');
+  assert.equal(calls[0], REQ);
+});
+
+test('P8b 只有 admit 口：{ rejection: 401/403/503 } → unauthorized / forbidden / rejected', async () => {
+  assert.equal((await inspectPlatformAuth(ctxWith(connectionAdmitting({ rejection: 401 })), REQ)).verdict, 'unauthorized');
+  assert.equal((await inspectPlatformAuth(ctxWith(connectionAdmitting({ rejection: 403 })), REQ)).verdict, 'forbidden');
+  const s = await inspectPlatformAuth(ctxWith(connectionAdmitting({ rejection: 503 })), REQ);
+  assert.equal(s.verdict, 'rejected');
+  assert.equal(s.status, 503, '未知码原样保留，不得压缩成 401/403');
+});
+
+test('P8c 只有 admit 口：抛异常 → error（放行，留原文供诊断）', async () => {
+  const auth = await inspectPlatformAuth(ctxWith({ admit: () => { throw new Error('admit blew up'); } }), REQ);
+  assert.equal(auth.verdict, 'error');
+  assert.equal(auth.available, false);
+  assert.equal(auth.error, 'admit blew up');
+});
+
+test('P8d 两口都在时 requestRejection 优先（老宿主零行为变化），admit 不被调用', async () => {
+  let admitCalls = 0;
+  const connection = {
+    requestRejection: async () => 401,
+    admit: async () => { admitCalls += 1; return { peer: {} }; },
+  };
+  const auth = await inspectPlatformAuth(ctxWith(connection), REQ);
+  assert.equal(auth.verdict, 'unauthorized');
+  assert.equal(admitCalls, 0, '老宿主必须走老口，不得碰新口');
+});
+
+test('P8e platformAuth:false + 只有 admit 口 → skipped，且不调用 admit（逃生门对新宿主同样关得掉）', async () => {
+  let called = 0;
+  const connection = { admit: async () => { called += 1; return { rejection: 401 }; } };
+  const auth = await inspectPlatformAuth(ctxWith(connection), REQ, { enforced: false });
+  assert.equal(auth.verdict, 'skipped');
+  assert.equal(auth.available, true);
+  assert.equal(called, 0, '关掉鉴权时不得再打平台（否则关不掉）');
 });
