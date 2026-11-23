@@ -861,7 +861,9 @@ test('U21m v1.2 入口文案两语言齐备（含面板/标题栏/设置行/入�
     'entrySettingsRow', 'entryTitlebar', 'entryCommandHint', 'panelTitle', 'panelDesc',
     'headerLabel', 'settingsRowLabel', 'settingsRowHint',
     'restartAborted', 'restartNotEffective', 'closeAborted', 'closeNotEffective',
-    'stagesTitle', 'stagePrep', 'stageStopMain', 'stageHostExit', 'stageRelaunch', 'stageWeb']) {
+    'stagesTitle', 'stagePrep', 'stageStopMain', 'stageHostExit', 'stageRelaunch', 'stageWeb',
+    'restartingTitle', 'closingTitle', 'restartStagePreparing', 'restartStageExiting',
+    'closeStagePreparing', 'closeStageExiting']) {
     const hits = source.split(key + ':').length - 1;
     assert.ok(hits >= 2, `文案键 ${key} 应同时出现在 zh 与 en 里`);
   }
@@ -1258,6 +1260,93 @@ test('U21z4 轮询网络错误不证明停机成功，保持 loading 并继续�
   await flush();
   assert.equal(intervals.length, 1, '网络错误不能证明成功，应继续等待有界轮询');
   assert.equal(modalRoots().length, 0, '网络暂断时不应立即判定失败');
+});
+
+// —— v1.5.0 重启占位层（方案 A，借官方更新流程 preparingRestart 形态）——
+// 202 派发后整页占位：标题 + role=status 活动状态行 + 旋转指示；正常路径随页面死，
+// 失败路径由有界轮询判定后退场、失败弹窗接手。
+
+function overlayNodes(env) {
+  return env.document.body.children.filter((n) => String(n.className || '').includes('dsrn-restart-overlay'));
+}
+function findOverlayNode(root, cls) {
+  const out = [];
+  const walk = (n) => {
+    if (!n || !Array.isArray(n.children)) return;
+    for (const c of n.children) { if (String(c.className || '').includes(cls)) out.push(c); walk(c); }
+  };
+  walk(root);
+  return out[0];
+}
+
+test('U21y 202 派发后立即整页占位：标题+活动状态行+不可关闭', async () => {
+  const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
+  const overlays = overlayNodes(env);
+  assert.equal(overlays.length, 1, '202 后应立即出现整页占位层');
+  const text = domText(overlays[0]).join(' ');
+  assert.ok(text.includes('正在重启 DeepSeek Harness'), `占位标题缺失：${text}`);
+  assert.ok(text.includes('已确认，正在停止应用…'), `初始状态行缺失：${text}`);
+  // 官方同款可达性：活动状态行 role=status / aria-live=polite（mandatory-update.html 同款）
+  const status = findOverlayNode(overlays[0], 'dsrn-restart-status');
+  assert.ok(status, '须有 dsrn-restart-status 状态行');
+  assert.equal(status.attributes.role, 'status');
+  assert.equal(status.attributes['aria-live'], 'polite');
+  // 占位层不可关闭：没有 x、不套弹窗结构（它是盖死整页的遮罩，不是对话框）
+  assert.equal(findOverlayNode(overlays[0], 'dsrn-modal-close'), undefined, '占位层不得带关闭按钮');
+  assert.equal(findOverlayNode(overlays[0], 'dsrn-modal-mask'), undefined, '占位层自身就是遮罩，不套弹窗结构');
+});
+
+test('U21y2 服务没了（停机进行中）→ 状态行切「应用正在退出…」，占位不退场不弹窗', async () => {
+  const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
+  env.modalRoots().forEach((m) => m.parentNode.removeChild(m));
+  env.envState.fail = true;
+  env.clock.advance(2000);
+  env.tickIntervals();
+  await flush();
+  await flush();
+  const overlays = overlayNodes(env);
+  assert.equal(overlays.length, 1, '停机进行中占位必须在场（这正是它的岗位）');
+  const text = domText(overlays[0]).join(' ');
+  assert.ok(text.includes('应用正在退出，即将自动重新打开…'), `状态行须切到退出阶段：${text}`);
+  assert.equal(env.modalRoots().length, 0, '停机进行中绝不弹窗');
+});
+
+test('U21y3 助手中止（failed 回执）→ 占位退场，失败弹窗接手', async () => {
+  const env = await dispatchRestart202({ probeBody: DESKTOP_PROBE });
+  env.modalRoots().forEach((m) => m.parentNode.removeChild(m));
+  env.envState.body = { ok: true, lastRestart: { status: 'failed', reason: 'identity-verification-failed' } };
+  env.clock.advance(21000);
+  env.tickIntervals();
+  await flush();
+  await flush();
+  assert.equal(overlayNodes(env).length, 0, '失败可见后占位必须退场');
+  assert.equal(env.modalRoots().length, 1, '失败弹窗接手');
+  assert.ok(domText(env.modalRoots()[0]).join(' ').includes('identity-verification-failed'));
+});
+
+test('U21y4 仅关闭 202 同款占位：标题/状态行按 close 文案分叉，退出阶段无重开承诺', async () => {
+  const pending = deferred();
+  const app = load({ probeBody: NO_CONFIRM_CLOSE, closeResponder: () => pending.promise });
+  app.captured.exports.apply(app.ctx, {});
+  await flush();
+  slotButton(app, 'main', '仅关闭').props.onClick();
+  findDomButton(app.modalRoots()[0], 'dsrn-confirm-action').__dispatch('click');
+  pending.resolve({ status: 202, body: { ok: true, mode: 'close' } });
+  await flush();
+  const overlays = overlayNodes(app);
+  assert.equal(overlays.length, 1, 'close 202 后同样有占位层');
+  const text = domText(overlays[0]).join(' ');
+  assert.ok(text.includes('正在关闭 DeepSeek Harness'), `close 标题分叉缺失：${text}`);
+  assert.ok(text.includes('已确认，正在关闭应用…'), `close 初始状态行缺失：${text}`);
+  // close 的退出阶段文案不得承诺「自动重新打开」（关闭终局没有重开）
+  app.envState.fail = true;
+  app.clock.advance(2000);
+  app.tickIntervals();
+  await flush();
+  await flush();
+  const text2 = domText(overlayNodes(app)[0]).join(' ');
+  assert.ok(text2.includes('应用正在退出…') && !text2.includes('自动重新打开'),
+    `close 退出阶段文案须无重开承诺：${text2}`);
 });
 
 test('U21z5 90s 总预算到点放弃：轮询停止、提示未生效、busy 复位', async () => {
