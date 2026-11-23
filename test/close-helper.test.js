@@ -19,6 +19,9 @@ for (const platform of ['win32', 'darwin']) {
     assert.ok(s.includes('const ACTION = "close"'));
     assert.ok(s.includes('const STAMP = "S-CLOSE"'), 'stamp 必须传给助手（回执防污染判据）');
     assert.ok(s.includes('closedAt'), 'close 成功写 closedAt 回执');
+    // v1.5.0：close 成功回执同样随附分段耗时（停机三段，总分止于 T3）
+    assert.ok(s.includes('stages: { prepMs: T1 - T0, stopMainMs: T2 - T1, hostExitMs: T3 - T2, totalMs: T3 - T0 }'),
+      'close 回执须带停机三段耗时');
     // 语法合法（把 require 替换后整体 parse）
     assert.doesNotThrow(() => new Function(s.replace(/require\s*\([^)]*\)/g, '({})')));
   });

@@ -310,7 +310,11 @@ const DESKTOP_PROBE = {
   version: '0.2.1-rc.2',
   supportedRange: '>=0.2.0-0',
   supported: true,
-  lastRestart: { status: 'ok', downtimeMs: 9400, newPid: 4242 },
+  lastRestart: {
+    status: 'ok', downtimeMs: 9400, newPid: 4242,
+    // v1.5.0 分段耗时：成功回执六段（含 webListen 观测段）
+    stages: { prepMs: 900, stopMainMs: 400, hostExitMs: 3100, relaunchMs: 3000, totalMs: 7400, webListenMs: 1800 },
+  },
   wait: { state: 'idle' },
 };
 
@@ -838,6 +842,14 @@ test('U21l 侧栏面板页：标题/说明/版本行/上次重启都在，且主
   assert.ok(text.includes('DSH 0.2.1-rc.2'), `版本行缺失：${text.slice(0, 160)}`);
   assert.ok(!/undefined|NaN/.test(text), `渲染出未定义值：${text.slice(0, 200)}`);
 
+  // v1.5.0 耗时明细行：「上次重启」行下一行，分段展示（每段一位小数，秒）
+  assert.ok(text.includes('耗时明细'), `耗时明细标题缺失：${text.slice(0, 200)}`);
+  assert.ok(text.includes('准备 0.9s'), `准备段缺失：${text.slice(0, 200)}`);
+  assert.ok(text.includes('停主进程 0.4s'), `停主进程段缺失：${text.slice(0, 200)}`);
+  assert.ok(text.includes('宿主退出 3.1s'), `宿主退出段缺失：${text.slice(0, 200)}`);
+  assert.ok(text.includes('拉起验证 3s'), `拉起验证段缺失：${text.slice(0, 200)}`);
+  assert.ok(text.includes('HTTP 就绪 1.8s'), `HTTP 就绪观测段缺失：${text.slice(0, 200)}`);
+
   // panellist 的图标组件只吃 {size, active}，返回图标元素（整行由侧栏自己画）
   const panellist = injected.find((i) => i.slotName === 'sidebar.panellist');
   const glyph = panellist.factory().render({ size: 16, active: true });
@@ -848,7 +860,8 @@ test('U21m v1.2 入口文案两语言齐备（含面板/标题栏/设置行/入�
   for (const key of ['entryGroup', 'entryPanel', 'entryFooter', 'entryHeader',
     'entrySettingsRow', 'entryTitlebar', 'entryCommandHint', 'panelTitle', 'panelDesc',
     'headerLabel', 'settingsRowLabel', 'settingsRowHint',
-    'restartAborted', 'restartNotEffective', 'closeAborted', 'closeNotEffective']) {
+    'restartAborted', 'restartNotEffective', 'closeAborted', 'closeNotEffective',
+    'stagesTitle', 'stagePrep', 'stageStopMain', 'stageHostExit', 'stageRelaunch', 'stageWeb']) {
     const hits = source.split(key + ':').length - 1;
     assert.ok(hits >= 2, `文案键 ${key} 应同时出现在 zh 与 en 里`);
   }

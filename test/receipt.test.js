@@ -113,3 +113,39 @@ test('U19h writeReceipt：写入失败静默返回 false（回执只是体验增
   assert.equal(ok, false);
   assert.equal(writeReceipt('', { a: 1 }), false, '无目录不写');
 });
+
+// —— v1.5.0 分段耗时：助手把 T0–T4 阶段耗时随回执落盘，展示层按段渲染 ——
+
+test('U19i summarizeReceipt 透传分段耗时：成功/仅关闭带合法 stages，老回执不冒键', () => {
+  // 成功回执：六段全量透传（含 webListen 观测段）
+  const ok = summarizeReceipt({
+    at: new Date(NOW).toISOString(), atMs: NOW, hostPid: 111,
+    respawnedAt: 'x', newPid: 4242, downtimeMs: 9000,
+    stages: { prepMs: 900, stopMainMs: 400, hostExitMs: 3100, relaunchMs: 3000, totalMs: 7400, webListenMs: 1800 },
+  }, NOW + 1000);
+  assert.equal(ok.status, 'ok');
+  assert.deepEqual(ok.stages, { prepMs: 900, stopMainMs: 400, hostExitMs: 3100, relaunchMs: 3000, totalMs: 7400, webListenMs: 1800 });
+
+  // 仅关闭回执：停机三段（无 relaunch/webListen 段），小数四舍五入成整数 ms
+  const closed = summarizeReceipt({
+    action: 'close', closedAt: 't', at: new Date(NOW).toISOString(), atMs: NOW, hostPid: 1,
+    stages: { prepMs: 900.4, stopMainMs: 400, hostExitMs: 3100, totalMs: 4400 },
+  }, NOW);
+  assert.equal(closed.status, 'closed');
+  assert.deepEqual(closed.stages, { prepMs: 900, stopMainMs: 400, hostExitMs: 3100, totalMs: 4400 });
+
+  // 非法段丢弃，合法段保留
+  const partial = summarizeReceipt({ respawnedAt: 'x', atMs: NOW, hostPid: 1, stages: { prepMs: 12, relaunchMs: 'x', totalMs: -1 } }, NOW);
+  assert.deepEqual(partial.stages, { prepMs: 12 }, '非法段须丢弃（非有限数/负数），合法段保留');
+
+  // 老回执（v1.4.x 无 stages）/ stages 全非法 → 不含 stages 键（面板不渲染明细行）
+  const legacy = summarizeReceipt({ respawnedAt: 'x', atMs: NOW, hostPid: 1, downtimeMs: 9000 }, NOW);
+  assert.equal('stages' in legacy, false, '老回执不得冒出 stages 键');
+  const junk = summarizeReceipt({ respawnedAt: 'x', atMs: NOW, hostPid: 1, stages: { prepMs: 'x' } }, NOW);
+  assert.equal('stages' in junk, false, '全非法 stages 也不含该键');
+
+  // 失败回执不带 stages（分段耗时只在成功/仅关闭回执里有）
+  const failed = summarizeReceipt({ failed: { reason: 'respawn-failed' }, atMs: NOW, hostPid: 1, stages: { totalMs: 1 } }, NOW);
+  assert.equal(failed.status, 'failed');
+  assert.equal('stages' in failed, false);
+});

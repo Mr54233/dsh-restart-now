@@ -565,3 +565,14 @@ test('双平台身份校验失败、PID 复用时不杀也不拉起；目标 exe
     assert.equal(kills.length, 1, platform + ' 实际运行 exe 与重启目标不同时仍应通过身份判定');
   }
 });
+
+// —— v1.5.0 分段耗时随回执落盘：T0–T4 打点本就存在（perf 日志），本条钉住「须进回执」——
+test('U1c 回执三个写点全带 stages（成功/仅关闭/webListen），两平台同构', () => {
+  for (const script of [makeScript(), makeMacScript()]) {
+    assert.equal((script.match(/stages: \{/g) || []).length, 3,
+      '恰好三个回执写点带 stages：仅关闭、成功、webListen 观测');
+    assert.ok(script.includes('totalMs: T3 - T0'), '仅关闭回执总分段止于 T3（无拉起段）');
+    assert.ok(script.includes('totalMs: T4 - T0'), '成功回执总分段用 T4');
+    assert.ok(script.includes('webListenMs: listen.wait'), 'webListen 写点须补 HTTP 就绪观测耗时');
+  }
+});
